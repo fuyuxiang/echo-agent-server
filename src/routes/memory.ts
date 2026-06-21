@@ -17,7 +17,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
 
   app.post('/api/project-memory/search', { preHandler: app.authenticate }, async (req, reply) => {
     const c = req.user as JwtClaims
-    if (!c.groupId) return reply.send(ok([]))
+    if (!c.groupId) return reply.send(fail(1010, '当前用户未分配分组'))
     const { query, topK } = (req.body ?? {}) as { query?: string; topK?: number }
     if (!query) return reply.send(fail(1012, '检索 query 不能为空'))
     const res = await searchMemories(db, embed, { groupId: c.groupId, query, topK: topK ?? 5 })
@@ -26,7 +26,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
 
   app.get('/api/project-memory', { preHandler: app.authenticate }, async (req, reply) => {
     const c = req.user as JwtClaims
-    if (!c.groupId) return reply.send(ok([]))
+    if (!c.groupId) return reply.send(fail(1010, '当前用户未分配分组'))
     const { limit, offset } = (req.query ?? {}) as { limit?: string; offset?: string }
     return reply.send(ok(listMemories(db, { groupId: c.groupId, limit: Number(limit ?? 50), offset: Number(offset ?? 0) })))
   })
