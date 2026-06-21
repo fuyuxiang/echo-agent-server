@@ -8,6 +8,9 @@ export async function ensureInitialAdmin(db: DB): Promise<void> {
   if (listUsers(db).length > 0) return
   const username = process.env.ECHO_ADMIN_USER ?? 'admin'
   const password = process.env.ECHO_ADMIN_PASSWORD ?? 'admin12345'
+  if (!process.env.ECHO_ADMIN_PASSWORD) {
+    console.warn('[echo-server] ECHO_ADMIN_PASSWORD not set, using default weak password!')
+  }
   await createUser(db, { username, password, role: 'admin', groupId: null })
 }
 

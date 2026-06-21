@@ -7,7 +7,7 @@ export async function authenticate(req: FastifyRequest, reply: FastifyReply): Pr
   try {
     await req.jwtVerify()
   } catch {
-    reply.code(401).send(fail(4011, '未认证或登录已过期'))
+    return reply.code(401).send(fail(4011, '未认证或登录已过期'))
   }
 }
 

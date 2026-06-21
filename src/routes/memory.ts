@@ -28,7 +28,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
     const c = req.user as JwtClaims
     if (!c.groupId) return reply.send(fail(1010, '当前用户未分配分组'))
     const { limit, offset } = (req.query ?? {}) as { limit?: string; offset?: string }
-    return reply.send(ok(listMemories(db, { groupId: c.groupId, limit: Number(limit ?? 50), offset: Number(offset ?? 0) })))
+    return reply.send(ok(listMemories(db, { groupId: c.groupId, limit: Math.min(Number(limit ?? 50) || 50, 200), offset: Number(offset ?? 0) })))
   })
 
   app.delete('/api/project-memory/:id', { preHandler: app.authenticate }, async (req, reply) => {
