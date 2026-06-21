@@ -1,3 +1,5 @@
+import { mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
 import Database from 'better-sqlite3'
 import * as sqliteVec from 'sqlite-vec'
 
@@ -45,6 +47,10 @@ const MIGRATIONS: ((db: DB) => void)[] = [
 ]
 
 export function getDb(path = process.env.ECHO_SERVER_DB ?? './data/echo-server.db'): DB {
+  // better-sqlite3 不会自动创建父目录，这里确保其存在（:memory: 等非文件路径除外）
+  if (path !== ':memory:' && !path.startsWith('file::memory:')) {
+    mkdirSync(dirname(path), { recursive: true })
+  }
   const db = new Database(path)
   db.pragma('journal_mode = WAL')
   sqliteVec.load(db)
