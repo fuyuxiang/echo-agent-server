@@ -32,8 +32,11 @@ export function createEmbeddingProvider(): EmbeddingProvider {
         headers: { 'content-type': 'application/json', authorization: `Bearer ${k}` },
         body: JSON.stringify({ model, input: text })
       })
+      if (!res.ok) throw new Error(`embedding API error ${res.status}: ${await res.text()}`)
       const json = (await res.json()) as { data: { embedding: number[] }[] }
-      return json.data[0].embedding
+      const vec = json.data[0].embedding
+      if (vec.length !== 1024) throw new Error(`embedding dim mismatch: expected 1024, got ${vec.length}. Set ECHO_EMBED_MODEL to a 1024-dim model or configure dimensions parameter`)
+      return vec
     }
   }
 }
