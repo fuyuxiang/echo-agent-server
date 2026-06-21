@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.local
+
+# tsc -b composite project emit artifacts
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
