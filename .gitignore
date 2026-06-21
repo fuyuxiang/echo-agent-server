@@ -2,3 +2,11 @@ node_modules/
 dist/
 *.db
 .env
+
+# 运行时产物
+run/
+logs/
+data/
+
+# macOS
+.DS_Store
