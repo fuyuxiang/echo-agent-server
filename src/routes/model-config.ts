@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import { ok } from '../reply.js'
 import { encryptSecret } from '../crypto.js'
+import { requireAdmin } from '../auth.js'
 
 const ROW_ID = 'org-default'
 
@@ -16,7 +17,7 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
     }))
   })
 
-  app.put('/api/admin/model-config', { preHandler: [app.authenticate, requireAdminInline] }, async (req, reply) => {
+  app.put('/api/admin/model-config', { preHandler: [app.authenticate, requireAdmin] }, async (req, reply) => {
     const { baseUrl, modelName, credential, allowLocalOverride } = (req.body ?? {}) as any
     const enc = credential ? encryptSecret(credential) : null
     db.prepare(`
@@ -28,9 +29,4 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
     `).run(ROW_ID, baseUrl ?? null, modelName ?? null, enc, allowLocalOverride ? 1 : 0, Date.now())
     return reply.send(ok({ updated: true }))
   })
-}
-
-// 局部 admin 校验(避免循环 import;与 auth.requireAdmin 同逻辑)
-async function requireAdminInline(req: any, reply: any): Promise<void> {
-  if (req.user?.role !== 'admin') reply.code(403).send({ code: 4031, msg: '需要管理员权限', data: null })
 }
