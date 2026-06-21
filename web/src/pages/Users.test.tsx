@@ -6,7 +6,7 @@ import Users from './Users'
 beforeEach(() => {
   vi.restoreAllMocks()
   vi.spyOn(adminApi, 'listUsers').mockResolvedValue([
-    { id: 'u1', username: 'admin', role: 'admin', groupId: null, disabled: false },
+    { id: 'u1', username: 'alice', role: 'admin', groupId: null, disabled: false },
   ])
   vi.spyOn(adminApi, 'listGroups').mockResolvedValue([{ id: 'g1', name: 'team' }])
 })
@@ -14,6 +14,6 @@ beforeEach(() => {
 describe('Users page', () => {
   it('renders fetched users', async () => {
     render(<Users />)
-    await waitFor(() => expect(screen.getAllByText('admin').length).toBeGreaterThan(0))
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument())
   })
 })
