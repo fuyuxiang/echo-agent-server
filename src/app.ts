@@ -7,6 +7,8 @@ import { findUserRowByName } from './dao/users.js'
 import { verifyPassword } from './crypto.js'
 import { authenticate, type JwtClaims } from './auth.js'
 import { registerMemoryRoutes } from './routes/memory.js'
+import { registerAdminRoutes } from './routes/admin.js'
+import { registerModelConfigRoutes } from './routes/model-config.js'
 
 export interface Deps { db: DB; embed: EmbeddingProvider }
 
@@ -28,6 +30,8 @@ export function buildApp(deps: Deps): FastifyInstance {
   })
 
   registerMemoryRoutes(app)
+  registerAdminRoutes(app)
+  registerModelConfigRoutes(app)
 
   return app
 }
