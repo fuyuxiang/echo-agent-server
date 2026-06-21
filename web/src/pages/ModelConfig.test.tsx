@@ -20,4 +20,14 @@ describe('ModelConfig page', () => {
     await waitFor(() => expect(update).toHaveBeenCalled())
     expect(update.mock.calls[0][0]).not.toHaveProperty('credential')
   })
+
+  it('includes credential in payload when a new value is typed', async () => {
+    const update = vi.spyOn(api, 'updateModelConfig').mockResolvedValue({ updated: true })
+    render(<ModelConfigPage />)
+    await waitFor(() => expect(screen.getByText('已配置')).toBeInTheDocument())
+    await userEvent.type(screen.getByPlaceholderText('输入以更新凭证'), 'sk-new-secret')
+    await userEvent.click(screen.getByRole('button', { name: /保\s*存/ }))
+    await waitFor(() => expect(update).toHaveBeenCalled())
+    expect(update.mock.calls[0][0]).toHaveProperty('credential', 'sk-new-secret')
+  })
 })
