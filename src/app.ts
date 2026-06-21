@@ -6,6 +6,7 @@ import { ok, fail } from './reply.js'
 import { findUserRowByName } from './dao/users.js'
 import { verifyPassword } from './crypto.js'
 import { authenticate, type JwtClaims } from './auth.js'
+import { registerMemoryRoutes } from './routes/memory.js'
 
 export interface Deps { db: DB; embed: EmbeddingProvider }
 
@@ -25,6 +26,8 @@ export function buildApp(deps: Deps): FastifyInstance {
     const token = app.jwt.sign(claims, { expiresIn: '7d' })
     return reply.send(ok({ token, user: { id: row.id, username: row.username, role: row.role, groupId: row.group_id } }))
   })
+
+  registerMemoryRoutes(app)
 
   return app
 }
