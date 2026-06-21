@@ -14,6 +14,6 @@ export async function authenticate(req: FastifyRequest, reply: FastifyReply): Pr
 export async function requireAdmin(req: FastifyRequest, reply: FastifyReply): Promise<void> {
   const claims = req.user as JwtClaims
   if (claims?.role !== 'admin') {
-    reply.code(403).send(fail(4031, '需要管理员权限'))
+    return reply.code(403).send(fail(4031, '需要管理员权限'))
   }
 }
