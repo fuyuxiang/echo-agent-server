@@ -9,6 +9,7 @@ import { authenticate, type JwtClaims } from './auth.js'
 import { registerMemoryRoutes } from './routes/memory.js'
 import { registerAdminRoutes } from './routes/admin.js'
 import { registerModelConfigRoutes } from './routes/model-config.js'
+import { registerKbRoutes } from './routes/kb.js'
 
 export interface Deps { db: DB; embed: EmbeddingProvider }
 
@@ -32,6 +33,7 @@ export function buildApp(deps: Deps): FastifyInstance {
   registerMemoryRoutes(app)
   registerAdminRoutes(app)
   registerModelConfigRoutes(app)
+  registerKbRoutes(app)
 
   return app
 }
