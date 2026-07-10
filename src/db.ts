@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import Database from 'better-sqlite3'
 import * as sqliteVec from 'sqlite-vec'
+import { migrateKb } from './kb/schema.js'
 
 export type DB = Database.Database
 
@@ -43,7 +44,8 @@ const MIGRATIONS: ((db: DB) => void)[] = [
       );
     `)
     db.exec(`CREATE VIRTUAL TABLE vec_memories USING vec0(memory_id TEXT PRIMARY KEY, embedding float[1024])`)
-  }
+  },
+  migrateKb,  // v2: 知识库
 ]
 
 export function getDb(path = process.env.ECHO_SERVER_DB ?? './data/echo-server.db'): DB {
