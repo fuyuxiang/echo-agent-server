@@ -17,7 +17,7 @@ export interface DocumentRow {
   updatedAt: number
 }
 
-export interface LocationPageSection { kind: 'page_section'; page: number; section?: string }
+export interface LocationPageSection { kind: 'page_section'; page?: number; section?: string }
 export interface LocationSheetCell { kind: 'sheet_cell'; sheet: string; cellRange: string }
 export interface LocationTimestamp { kind: 'timestamp'; startMs: number; endMs: number }
 export interface LocationPlain { kind: 'plain'; offset: number; length: number }
