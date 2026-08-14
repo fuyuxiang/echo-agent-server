@@ -49,6 +49,27 @@ export default function ModelConfig() {
         description="不同模型的向量空间不可混用。改动 embedModel 或 embedDim 后,已有文档需逐一「重建」才能被正确检索。"
       />
 
+      {/*
+        配置里写的是「打算用什么」,但没配远端地址时跑的是占位实现 ——
+        检索质量差一个量级,最容易被误归因到文档质量上。打开这页就应能看到
+        当前到底是什么,不必等用户报障。
+      */}
+      {cfg?.runtime && !cfg.runtime.productionReady && (
+        <Alert
+          type="error"
+          showIcon
+          message="当前未使用真实模型能力"
+          description={
+            <>
+              嵌入器 {cfg.runtime.semantic ? '✓' : '占位实现'} · 精排{' '}
+              {cfg.runtime.crossEncoder ? '✓' : '占位实现'}。
+              请在服务端配置 <code>ECHO_EMBED_URL</code> 与{' '}
+              <code>ECHO_RERANK_URL</code> 后重启。
+            </>
+          }
+        />
+      )}
+
       <Card
         title="模型配置"
         extra={

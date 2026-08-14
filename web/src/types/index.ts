@@ -174,6 +174,21 @@ export interface ModelConfig {
   // 服务端代理推理,Key 不下发客户端。
   proxied: boolean
   updatedAt?: number
+  /**
+   * 实际生效的模型能力。
+   *
+   * 配置里的模型名是"打算用什么",这里是"真正在跑什么" ——
+   * 未配 ECHO_EMBED_URL 时 embedder.semantic=false,跑的是 hash 伪嵌入,
+   * 检索质量会差一个量级。productionReady 是两路语义能力同时具备才为真,
+   * 提示一打开页面就能看到,不必等到用户报障才发现。
+   */
+  runtime?: {
+    embedder: string
+    semantic: boolean
+    reranker: string
+    crossEncoder: boolean
+    productionReady: boolean
+  }
 }
 
 export interface QualityOverview {
