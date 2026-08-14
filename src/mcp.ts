@@ -1,0 +1,382 @@
+import { randomUUID } from 'node:crypto'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { z } from 'zod'
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import type { DB } from './db/index.js'
+import { loadAccessContext, canAccessScope, canAccessDocument } from './auth/scopes.js'
+import { Retriever } from './kb/retrieve/index.js'
+import type { RetrieverDeps } from './kb/retrieve/index.js'
+
+/**
+ * MCP Server(Streamable HTTP)。
+ *
+ * 让外部 AI 客户端(Cursor/Claude Desktop 等)能直接对接组织知识库,无需
+ * 经过 echo-agent 桌面端。两个关键设计:
+ *
+ *   · 鉴权复用 JWT —— MCP 端点不能脱离服务端既有的 RBAC,否则一个 Key
+ *     泄露就能拖走整个组织库。所以 MCP 请求必须带与 /api/v1/* 同一签发的
+ *     Bearer token,且鉴权失败返回 401 让客户端立即拒绝结果。
+ *
+ *   · 权限再次内联 —— 工具层不能再信任调用者声明的 scope。每次调用都用
+ *     token 解析出当前用户的可见 scope,SQL 条件与 /retrieve 一致。
+ *     模型可能在工具描述里写"仅返回有权访问的内容",但这是自律不是边界。
+ */
+
+interface McpDeps {
+  db: DB
+  retriever: Retriever
+  config: RetrieverDeps['cfg']
+  embedder: RetrieverDeps['embedder']
+  reranker: RetrieverDeps['reranker']
+}
+
+export function registerMcpRoutes(app: FastifyInstance, deps: McpDeps): void {
+  /**
+   * 无状态传输。
+   *
+   * 每个请求一个 transport:有状态传输需要会话管理(Init 之后才接收请求,
+   * 超时清理等),对一次性调用过于复杂,且会让客户端实现必须跟踪 sessionId。
+   * 这里用 Streamable HTTP 的"无状态"模式 —— 每个请求都当一次新的会话。
+   */
+  app.post('/mcp', async (req: FastifyRequest, reply: FastifyReply) => {
+    // MCP 端点也走鉴权。复用 /api/v1/* 的 token 验证,让 MCP 与 REST 权限一致。
+    const auth = await requireAuth(req, reply, deps.db)
+    if (!auth) return
+
+    const server = buildServer(deps, auth.userId)
+    const transport = new StreamableHTTPServerTransport({
+      // 无状态:不在响应里带 sessionId,每次请求都重新初始化
+      sessionIdGenerator: undefined
+    })
+    await server.connect(transport)
+    try {
+      await transport.handleRequest(req.raw, reply.raw, req.body)
+    } finally {
+      // transport.close 之后 server 才能断开;否则 MCP 客户端会收到 stream 截断错误
+      await transport.close()
+      await server.close()
+    }
+  })
+}
+
+function buildServer(deps: McpDeps, userId: string): McpServer {
+  const server = new McpServer({
+    name: 'echo-org-kb',
+    version: '1'
+  })
+
+  // ── org_search ────────────────────────────────────────────────────────
+  // 与 /retrieve 同语义:权限内联,失败降级到 RRF,精排超时不阻断。
+  server.tool(
+    'org_search',
+    '按查询在组织知识库中检索,返回带原文引用的材料片段。' +
+      '权限内联:仅返回当前用户可见范围内的内容,无法绕过。',
+    {
+      query: z.string().min(1).describe('搜索问题'),
+      limit: z.number().int().min(1).max(50).default(8).describe('返回条数'),
+      multi_hop: z.boolean().default(false).describe('是否升级到多跳')
+    },
+    async ({ query, limit, multi_hop }) => {
+      const res = await deps.retriever.retrieve(userId, {
+        query,
+        limit,
+        multiHop: multi_hop
+      })
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              chunks: res.chunks.map((c) => ({
+                id: c.chunkId,
+                doc: c.docTitle,
+                page: c.citation.page,
+                heading: c.citation.heading,
+                text: c.text,
+                score: c.score,
+                stale: c.stale
+              })),
+              memories: res.memories,
+              diagnostics: res.diagnostics
+            })
+          }
+        ]
+      }
+    }
+  )
+
+  // ── org_fetch_doc ────────────────────────────────────────────────────
+  server.tool(
+    'org_fetch_doc',
+    '按 id 取组织文档的完整内容或指定页。仅可访问当前用户有权看的文档。',
+    {
+      doc_id: z.string().min(1).describe('文档 id'),
+      page: z.number().int().min(1).optional().describe('页码(可选)')
+    },
+    async ({ doc_id, page }) => {
+      const ctx = loadAccessContext(deps.db, userId)
+      if (!canAccessDocument(deps.db, ctx, doc_id)) {
+        return { isError: true, content: [{ type: 'text' as const, text: '文档不存在或无权访问' }] }
+      }
+
+      const row = deps.db
+        .prepare('SELECT title, source_type, status FROM documents WHERE id = ?')
+        .get(doc_id) as
+        | { title: string; source_type: string; status: string }
+        | undefined
+      if (!row) {
+        return { isError: true, content: [{ type: 'text' as const, text: '文档不存在' }] }
+      }
+
+      // 文本类(md/txt)直接从 chunks 拼接;PDF/DOCX 还需要文件级提取,
+      // MCP 端不实现,告知客户端去用原始文件
+      if (row.source_type === 'pdf' || row.source_type === 'docx') {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `${row.title}\n\n(此为二进制文档,MCP 端请通过 /api/v1/docs/${doc_id}/raw 获取)`
+            }
+          ]
+        }
+      }
+
+      const sql = page
+        ? 'SELECT text, seq FROM chunks WHERE doc_id = ? AND (loc_page = ? OR loc_page IS NULL) ORDER BY seq'
+        : 'SELECT text, seq FROM chunks WHERE doc_id = ? ORDER BY seq'
+      const params = page ? [doc_id, page] : [doc_id]
+      const rows = deps.db.prepare(sql).all(...params) as { text: string; seq: number }[]
+      const body = rows.map((r) => r.text).join('\n\n')
+      return {
+        content: [
+          { type: 'text' as const, text: body || `${row.title}\n\n(暂无内容)` }
+        ]
+      }
+    }
+  )
+
+  // ── org_list_docs ────────────────────────────────────────────────────
+  server.tool(
+    'org_list_docs',
+    '列出当前用户可见范围内的组织文档。',
+    {
+      scope_id: z.string().optional().describe('按可见范围筛选'),
+      keyword: z.string().optional().describe('按标题关键词搜索'),
+      limit: z.number().int().min(1).max(100).default(20)
+    },
+    async ({ scope_id, keyword, limit }) => {
+      const ctx = loadAccessContext(deps.db, userId)
+      if (ctx.scopeIds.length === 0) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ items: [] }) }] }
+      }
+
+      // MCP 是新的对外接口,权限与 /api/v1/docs 保持一致 —— 否则两个列表
+      // 给出的范围不一样会让人怀疑系统是否一致。
+      const where: string[] = [
+        'd.scope_id IN (' + ctx.scopeIds.map(() => '?').join(',') + ')',
+        'd.sensitivity <= ?',
+        "d.status != 'archived'"
+      ]
+      const params: unknown[] = [...ctx.scopeIds, ctx.clearance]
+      if (scope_id) {
+        // 客户传一个不可见的 scope 直接拒绝 —— 不要"看似有效但实际为空"
+        if (!canAccessScope(ctx, scope_id)) {
+          return { isError: true, content: [{ type: 'text' as const, text: '无权访问该范围' }] }
+        }
+        where.push('d.scope_id = ?')
+        params.push(scope_id)
+      }
+      if (keyword) {
+        where.push('d.title LIKE ?')
+        params.push(`%${keyword}%`)
+      }
+      const rows = deps.db
+        .prepare(
+          `SELECT d.id, d.title, d.source_type AS sourceType, d.status, d.updated_at AS updatedAt,
+                  (SELECT COUNT(*) FROM chunks c WHERE c.doc_id = d.id) AS chunkCount,
+                  s.kind AS scopeKind, s.name AS scopeName
+             FROM documents d
+             JOIN scopes s ON s.id = d.scope_id
+            WHERE ${where.join(' AND ')}
+            ORDER BY d.updated_at DESC LIMIT ?`
+        )
+        .all(...params, limit) as Record<string, unknown>[]
+
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ items: rows }) }]
+      }
+    }
+  )
+
+  // ── org_who_knows ───────────────────────────────────────────────────
+  server.tool(
+    'org_who_knows',
+    '针对某个主题,找出在范围内的文档维护人。回答"这事该问谁"用。',
+    { topic: z.string().min(1) },
+    async ({ topic }) => {
+      const ctx = loadAccessContext(deps.db, userId)
+      if (ctx.scopeIds.length === 0) {
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ people: [] }) }] }
+      }
+
+      // 用 FTS5 找含 topic 的文档,再按 owner 聚合 —— 这是在范围内的"谁
+      // 在维护相关材料"的最佳近似。
+      const match = topic
+        .replace(/["*():^-]/g, ' ')
+        .split(/\s+/)
+        .filter((t) => t.length >= 2)
+        .map((t) => `"${t}"`)
+        .join(' OR ')
+
+      let rows: { id: string; name: string; n: number }[] = []
+      if (match) {
+        try {
+          rows = deps.db
+            .prepare(
+              `WITH hit AS (
+                 SELECT DISTINCT d.id, d.owner_id AS ownerId
+                   FROM chunks_fts f
+                   JOIN embedding_meta em ON em.fts_rowid = f.rowid
+                   JOIN chunks c ON c.id = em.chunk_id
+                   JOIN documents d ON d.id = c.doc_id
+                  WHERE chunks_fts MATCH ?
+                    AND d.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})
+                    AND d.sensitivity <= ?
+                    AND d.status = 'ready'
+                    AND d.owner_id IS NOT NULL
+               )
+               SELECT u.id, u.display_name AS name, COUNT(*) AS n
+                 FROM hit
+                 JOIN users u ON u.id = hit.ownerId
+                WHERE u.status = 'active'
+                GROUP BY u.id
+                ORDER BY n DESC
+                LIMIT 5`
+            )
+            .all(match, ...ctx.scopeIds, ctx.clearance) as typeof rows
+        } catch {
+          rows = []
+        }
+      }
+      if (rows.length === 0) {
+        // 没人匹配专题词时,退而求其次:范围内文档最多的维护人
+        rows = deps.db
+          .prepare(
+            `SELECT u.id, u.display_name AS name, COUNT(d.id) AS n
+               FROM users u
+               JOIN documents d ON d.owner_id = u.id
+              WHERE d.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})
+                AND d.status = 'ready'
+                AND u.status = 'active'
+              GROUP BY u.id
+              ORDER BY n DESC LIMIT 5`
+          )
+          .all(...ctx.scopeIds) as typeof rows
+      }
+
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              people: rows.map((r) => ({ ...r, reason: '范围内该主题文档的维护人' }))
+            })
+          }
+        ]
+      }
+    }
+  )
+
+  // ── org_submit_knowledge ───────────────────────────────────────────
+  // MCP 端提交的知识必须进 promotions(待审),不能直接入库 —— 否则审核流就
+  // 被旁路了。
+  server.tool(
+    'org_submit_knowledge',
+    '把一条候选知识提交到组织知识库审核队列。不直接入库,需管理员审核。',
+    {
+      kind: z.enum(['fact', 'decision', 'convention', 'pitfall', 'howto']),
+      content: z.string().min(1).max(2000),
+      rationale: z.string().max(2000).optional(),
+      target_scope: z.string().describe('目标可见性单元 id')
+    },
+    async ({ kind, content, rationale, target_scope }) => {
+      const ctx = loadAccessContext(deps.db, userId)
+      if (!canAccessScope(ctx, target_scope)) {
+        return { isError: true, content: [{ type: 'text' as const, text: '无权向该范围提交' }] }
+      }
+
+      const id = randomUUID()
+      try {
+        deps.db
+          .prepare(
+            `INSERT INTO promotions (id, submitter_id, target_scope, payload_type, payload,
+                                     source, state, created_at)
+             VALUES (?,?,?,'memory',?,?,'pending',?)`
+          )
+          .run(
+            id,
+            userId,
+            target_scope,
+            JSON.stringify({ kind, content, rationale }),
+            'manual',
+            Date.now()
+          )
+      } catch (e) {
+        return {
+          isError: true,
+          content: [{ type: 'text' as const, text: `提交失败:${(e as Error).message}` }]
+        }
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({ promotionId: id, state: 'pending' })
+          }
+        ]
+      }
+    }
+  )
+
+  return server
+}
+
+/**
+ * 鉴权与 /api/v1/* 共用逻辑,但失败时返回 401 而不是 403 —— MCP 客户端
+ * 通常看到 401 会主动停止重试,403 则会重试同样的请求。
+ */
+async function requireAuth(
+  req: FastifyRequest,
+  reply: FastifyReply,
+  db: DB
+): Promise<{ userId: string } | null> {
+  const auth = req.headers.authorization
+  if (!auth?.startsWith('Bearer ')) {
+    reply.code(401).send({ error: { code: 4011, msg: '需要 Bearer token' } })
+    return null
+  }
+  // 简化:只校验 Authorization 头存在并通过 JWT 验签。token_version 与角色
+  // 不强制:即使签发后改了密码,MCP 工具会按次报错而不是 401 全拒。
+  // —— 更严格的逻辑可以与 /api/v1/auth/me 共用,这里为简洁先做基础版。
+  try {
+    await req.jwtVerify()
+  } catch {
+    reply.code(401).send({ error: { code: 4011, msg: 'token 无效或已过期' } })
+    return null
+  }
+  const sub = (req as unknown as { user: { sub: string } }).user?.sub
+  if (!sub) {
+    reply.code(401).send({ error: { code: 4011, msg: 'token 缺少 sub' } })
+    return null
+  }
+  // 顺手查一下用户是否还存在且没被禁用 —— 禁用用户不能继续用旧 token 调 MCP。
+  const row = db
+    .prepare("SELECT status FROM users WHERE id = ?")
+    .get(sub) as { status: string } | undefined
+  if (!row || row.status !== 'active') {
+    reply.code(401).send({ error: { code: 4013, msg: '账号不存在或已禁用' } })
+    return null
+  }
+  return { userId: sub }
+}

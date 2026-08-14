@@ -18,6 +18,7 @@ import { registerPromotionRoutes } from './routes/promotions.js'
 import { registerMemoryRoutes } from './routes/memories.js'
 import { registerSyncRoutes } from './routes/sync.js'
 import { registerQualityRoutes } from './routes/quality.js'
+import { registerMcpRoutes } from './mcp.js'
 import { registerWeb } from './web.js'
 import type { Deps } from './types.js'
 
@@ -90,6 +91,15 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   registerMemoryRoutes(app)
   registerSyncRoutes(app)
   registerQualityRoutes(app)
+  registerMcpRoutes(app, {
+    db,
+    retriever:
+      opts.overrides?.retriever ??
+      new Retriever({ db, cfg, embedder, reranker, log }),
+    config: cfg,
+    embedder,
+    reranker
+  })
 
   // 静态资源放最后注册:它带 SPA 回退的 notFoundHandler,先注册会抢在
   // 真实接口之前接管请求。测试时可关闭以免加载不存在的构建产物。
