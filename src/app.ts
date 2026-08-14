@@ -69,7 +69,16 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   app.get('/api/v1/health', async () => ({
     ok: true,
     version: 1,
-    schemaVersion: db.pragma('user_version', { simple: true })
+    schemaVersion: db.pragma('user_version', { simple: true }),
+    // 暴露实际生效的模型能力。配置里写着 bge-m3 但跑的是占位实现时,
+    // 从模型名看不出差别 —— 而两者的检索质量差一个量级。
+    models: {
+      embedder: deps.embedder.model,
+      semantic: deps.embedder.semantic,
+      reranker: deps.reranker.model,
+      crossEncoder: deps.reranker.crossEncoder,
+      productionReady: deps.embedder.semantic && deps.reranker.crossEncoder
+    }
   }))
 
   registerAuthRoutes(app)

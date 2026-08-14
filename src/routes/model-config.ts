@@ -19,8 +19,25 @@ const PutSchema = z.object({
 })
 
 export function registerModelConfigRoutes(app: FastifyInstance): void {
-  const { db, cfg } = app.deps
+  const { db, cfg, embedder, reranker } = app.deps
   const masterKey = deriveKey(cfg.masterKey)
+
+  /**
+   * 实际生效的模型能力。
+   *
+   * 配置里的 embedModel 是"打算用什么",这里是"真正在跑什么" —— 未配置
+   * ECHO_EMBED_URL 时后者是占位实现。两者不一致时管理端要能看出来,否则
+   * 会把"检索质量差"归因到文档质量上。
+   */
+  const runtimeModels = (): Record<string, unknown> => ({
+    runtime: {
+      embedder: embedder.model,
+      semantic: embedder.semantic,
+      reranker: reranker.model,
+      crossEncoder: reranker.crossEncoder,
+      productionReady: embedder.semantic && reranker.crossEncoder
+    }
+  })
 
   /**
    * 客户端只拿到非敏感字段。
@@ -44,7 +61,8 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
           embedModel: null,
           embedDim: null,
           hasCredential: false,
-          proxied: true
+          proxied: true,
+          ...runtimeModels()
         })
       )
     }
@@ -62,7 +80,8 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
         // 刻意不含任何 Key 字段。客户端据 proxied=true 走 /api/v1/llm/chat。
         hasCredential: !!row.chat_key_enc,
         proxied: true,
-        updatedAt: row.updated_at
+        updatedAt: row.updated_at,
+        ...runtimeModels()
       })
     )
   })

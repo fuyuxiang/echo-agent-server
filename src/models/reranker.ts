@@ -12,6 +12,13 @@ export interface RerankResult {
 
 export interface Reranker {
   readonly model: string
+  /**
+   * 是否为真正的交叉编码器。
+   *
+   * 词汇重叠打分只看字面重合,"住宿标准"与"住宿费用上限"的相关性它判不出来。
+   * 精排是准确率从"能用"到"可信"的分界,跑在占位实现上等于没有这一步。
+   */
+  readonly crossEncoder: boolean
   /** 返回按相关度降序的结果。抛错由调用方降级处理。 */
   rerank(query: string, items: RerankItem[]): Promise<RerankResult[]>
 }
@@ -22,6 +29,7 @@ export interface Reranker {
 export const RERANK_TIMEOUT_MS = 300
 
 class RemoteReranker implements Reranker {
+  readonly crossEncoder = true
   constructor(
     readonly model: string,
     private url: string,
@@ -81,6 +89,7 @@ function gram2(s: string): string[] {
 
 class LexicalReranker implements Reranker {
   readonly model = 'lexical-dev'
+  readonly crossEncoder = false
   async rerank(query: string, items: RerankItem[]): Promise<RerankResult[]> {
     return items
       .map((i) => ({ id: i.id, score: lexicalOverlapScore(query, i.text) }))
