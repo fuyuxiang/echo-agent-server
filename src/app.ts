@@ -1,39 +1,83 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import jwt from '@fastify/jwt'
-import type { DB } from './db.js'
-import type { EmbeddingProvider } from './embedding.js'
-import { ok, fail } from './reply.js'
-import { findUserRowByName } from './dao/users.js'
-import { verifyPassword } from './crypto.js'
-import { authenticate, type JwtClaims } from './auth.js'
-import { registerMemoryRoutes } from './routes/memory.js'
-import { registerAdminRoutes } from './routes/admin.js'
+import multipart from '@fastify/multipart'
+import type { DB } from './db/index.js'
+import type { Config } from './config.js'
+import { createEmbedder } from './models/embedder.js'
+import { createReranker } from './models/reranker.js'
+import { Retriever } from './kb/retrieve/index.js'
+import { makeAuthenticate, LoginThrottle } from './auth/jwt.js'
+import { makeAudit } from './audit.js'
+import { FsStorage } from './kb/storage/index.js'
+import { registerAuthRoutes } from './routes/auth.js'
+import { registerRetrieveRoutes } from './routes/retrieve.js'
 import { registerModelConfigRoutes } from './routes/model-config.js'
-import { registerKbRoutes } from './routes/kb.js'
+import { registerAdminRoutes } from './routes/admin.js'
+import { registerDocsRoutes } from './routes/docs.js'
+import { registerPromotionRoutes } from './routes/promotions.js'
+import { registerMemoryRoutes } from './routes/memories.js'
+import { registerSyncRoutes } from './routes/sync.js'
+import { registerQualityRoutes } from './routes/quality.js'
+import type { Deps } from './types.js'
 
-export interface Deps { db: DB; embed: EmbeddingProvider }
+export interface BuildOptions {
+  db: DB
+  cfg: Config
+  /** 覆盖依赖,便于测试注入假实现。 */
+  overrides?: Partial<Deps>
+}
 
-export function buildApp(deps: Deps): FastifyInstance {
-  const app = Fastify({ logger: false })
-  app.decorate('deps', deps)
-  app.register(jwt, { secret: process.env.ECHO_SERVER_SECRET ?? 'dev-secret' })
-  app.decorate('authenticate', authenticate)
-
-  app.post('/api/auth/login', async (req, reply) => {
-    const { username, password } = (req.body ?? {}) as { username?: string; password?: string }
-    if (!username || !password) return reply.send(fail(1001, '缺少用户名或密码'))
-    const row = findUserRowByName(deps.db, username)
-    if (!row || row.disabled) return reply.send(fail(1002, '用户不存在或已禁用'))
-    if (!(await verifyPassword(row.password_hash, password))) return reply.send(fail(1003, '密码错误'))
-    const claims: JwtClaims = { sub: row.id, role: row.role, groupId: row.group_id }
-    const token = app.jwt.sign(claims, { expiresIn: '7d' })
-    return reply.send(ok({ token, user: { id: row.id, username: row.username, role: row.role, groupId: row.group_id } }))
+export function buildApp(opts: BuildOptions): FastifyInstance {
+  const { db, cfg } = opts
+  const app = Fastify({
+    logger: false,
+    // 上传走 multipart,JSON 体不需要很大;限制在此可挡住畸形大包。
+    bodyLimit: 2 * 1024 * 1024
   })
 
-  registerMemoryRoutes(app)
-  registerAdminRoutes(app)
+  const warn = (m: string): void => {
+    // eslint-disable-next-line no-console
+    console.warn(`[echo-server] ${m}`)
+  }
+
+  const embedder = opts.overrides?.embedder ?? createEmbedder(cfg, warn)
+  const reranker = opts.overrides?.reranker ?? createReranker(cfg, warn)
+  const log = { warn }
+
+  const deps: Deps = {
+    db,
+    cfg,
+    embedder,
+    reranker,
+    storage: opts.overrides?.storage ?? new FsStorage(cfg.storageDir),
+    retriever:
+      opts.overrides?.retriever ??
+      new Retriever({ db, cfg, embedder, reranker, log }),
+    throttle: opts.overrides?.throttle ?? new LoginThrottle(),
+    ...opts.overrides
+  }
+
+  app.decorate('deps', deps)
+  app.decorate('audit', makeAudit(db, (e) => warn(`审计写入失败: ${String(e)}`)))
+  app.register(jwt, { secret: cfg.jwtSecret })
+  app.register(multipart, { limits: { fileSize: cfg.maxUploadBytes, files: 1 } })
+  app.decorate('authenticate', makeAuthenticate(db))
+
+  app.get('/api/v1/health', async () => ({
+    ok: true,
+    version: 1,
+    schemaVersion: db.pragma('user_version', { simple: true })
+  }))
+
+  registerAuthRoutes(app)
+  registerRetrieveRoutes(app)
   registerModelConfigRoutes(app)
-  registerKbRoutes(app)
+  registerAdminRoutes(app)
+  registerDocsRoutes(app)
+  registerPromotionRoutes(app)
+  registerMemoryRoutes(app)
+  registerSyncRoutes(app)
+  registerQualityRoutes(app)
 
   return app
 }
