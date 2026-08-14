@@ -40,7 +40,7 @@ async function setup(): Promise<Ctx> {
   const alice = await createUser(db, { username: 'alice', password: 'alice-password' })
   setUserGroups(db, alice.id, ['g_fin'])
 
-  return { db, app: buildApp({ db, cfg }), orgScope, teamScope, aliceId: alice.id }
+  return { db, app: buildApp({ db, cfg, serveWeb: false }), orgScope, teamScope, aliceId: alice.id }
 }
 
 async function login(app: FastifyInstance, u: string, p: string): Promise<string> {

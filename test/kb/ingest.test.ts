@@ -27,7 +27,7 @@ async function setup(): Promise<{ db: DB; app: FastifyInstance; scopeId: string 
     clearance: 2
   })
   await createUser(db, { username: 'alice', password: 'alice-password' })
-  return { db, app: buildApp({ db, cfg }), scopeId }
+  return { db, app: buildApp({ db, cfg, serveWeb: false }), scopeId }
 }
 
 async function login(app: FastifyInstance, u: string, p: string): Promise<string> {

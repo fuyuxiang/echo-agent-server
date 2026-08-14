@@ -8,7 +8,8 @@ export default defineConfig({
     host: '0.0.0.0',
     port: 9980,
     proxy: {
-      '/api': { target: 'http://localhost:8030', changeOrigin: true },
+      // 与 config.ts 的默认 ECHO_PORT 保持一致。旧值 8030 早已不是服务端端口。
+      '/api': { target: 'http://localhost:8787', changeOrigin: true },
     },
   },
   test: {

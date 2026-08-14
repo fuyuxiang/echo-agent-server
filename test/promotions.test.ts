@@ -42,7 +42,7 @@ async function setup(): Promise<Ctx> {
   setUserGroups(db, alice.id, ['g_fin'])
   setUserGroups(db, bob.id, [])
 
-  return { db, app: buildApp({ db, cfg }), orgScope, teamScope }
+  return { db, app: buildApp({ db, cfg, serveWeb: false }), orgScope, teamScope }
 }
 
 async function login(app: FastifyInstance, u: string, p: string): Promise<string> {

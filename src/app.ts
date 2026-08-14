@@ -18,6 +18,7 @@ import { registerPromotionRoutes } from './routes/promotions.js'
 import { registerMemoryRoutes } from './routes/memories.js'
 import { registerSyncRoutes } from './routes/sync.js'
 import { registerQualityRoutes } from './routes/quality.js'
+import { registerWeb } from './web.js'
 import type { Deps } from './types.js'
 
 export interface BuildOptions {
@@ -25,6 +26,8 @@ export interface BuildOptions {
   cfg: Config
   /** 覆盖依赖,便于测试注入假实现。 */
   overrides?: Partial<Deps>
+  /** 关闭静态托管。测试里不需要,也不该依赖 web/dist 是否已构建。 */
+  serveWeb?: boolean
 }
 
 export function buildApp(opts: BuildOptions): FastifyInstance {
@@ -78,6 +81,10 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   registerMemoryRoutes(app)
   registerSyncRoutes(app)
   registerQualityRoutes(app)
+
+  // 静态资源放最后注册:它带 SPA 回退的 notFoundHandler,先注册会抢在
+  // 真实接口之前接管请求。测试时可关闭以免加载不存在的构建产物。
+  if (opts.serveWeb !== false) registerWeb(app, warn)
 
   return app
 }
