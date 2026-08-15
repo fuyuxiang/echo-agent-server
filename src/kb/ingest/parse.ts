@@ -4,6 +4,7 @@ import type { SourceType } from '../types.js'
 import { textParser } from '../parsers/text.js'
 import { docxParser } from '../parsers/docx.js'
 import { pdfParser } from '../parsers/pdf.js'
+import { audioParser, videoParser, mediaParserFor } from '../parsers/media.js'
 import type { ParserUnit } from '../parsers/types.js'
 
 export interface ParseResult {
@@ -128,6 +129,14 @@ export async function parseDocument(
       const units = await docxParser.parse(buf, { docId, fileName })
       return { blocks: units.map(unitToBlock), pageCount: null }
     }
+    case 'audio': {
+      const units = await audioParser.parse(buf, { docId, fileName })
+      return { blocks: units.map(unitToBlock), pageCount: null }
+    }
+    case 'video': {
+      const units = await videoParser.parse(buf, { docId, fileName })
+      return { blocks: units.map(unitToBlock), pageCount: null }
+    }
     case 'pdf': {
       const units = await pdfParser.parse(buf, { docId, fileName })
       const pages = new Set(
@@ -150,7 +159,18 @@ const EXT_MAP: Record<string, SourceType> = {
   '.md': 'md',
   '.markdown': 'md',
   '.txt': 'txt',
-  '.text': 'txt'
+  '.text': 'txt',
+  '.mp3': 'audio',
+  '.wav': 'audio',
+  '.m4a': 'audio',
+  '.flac': 'audio',
+  '.ogg': 'audio',
+  '.opus': 'audio',
+  '.mp4': 'video',
+  '.mov': 'video',
+  '.mkv': 'video',
+  '.webm': 'video',
+  '.avi': 'video'
 }
 
 export function sourceTypeFromName(fileName: string): SourceType | null {
