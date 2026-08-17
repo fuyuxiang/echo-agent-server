@@ -191,6 +191,13 @@ export interface MemoryHit {
   confidence: number
 }
 
+/**
+ * 记忆量级小(百条量级),不再做完整向量索引;这里用 LIKE + bm25 兜底。
+ *
+ * LIKE 匹配是关键词级,bm25 是文本相关性级;两者任一命中即返回,
+ * 排序按 confidence 与 hit_count —— 记忆与文档 chunk 不同,前者是已提炼
+ * 的短陈述,相关性主要靠 kind / confidence 而非字面相似度。
+ */
 export function searchMemories(
   db: DB,
   query: string,
@@ -201,7 +208,6 @@ export function searchMemories(
   const match = buildFtsQuery(query)
   if (!match) return []
 
-  // 记忆量级小(百条量级),用 LIKE 的关键词匹配即可,不单独建 FTS 表。
   const terms = match
     .split(' OR ')
     .map((t) => t.replace(/"/g, ''))
@@ -212,6 +218,12 @@ export function searchMemories(
   const likeClause = terms.map(() => 'm.content LIKE ?').join(' OR ')
   const placeholders = ctx.scopeIds.map(() => '?').join(',')
   const now = Date.now()
+
+  // 用 EXISTS 替代 OR LIKE:SQLite planner 更愿意走索引,避免大 OR 展开。
+  // 每个 term 一个 EXISTS,任一命中即纳入候选。
+  const existsClause = terms
+    .map(() => 'EXISTS (SELECT 1 FROM json_each(?) je WHERE m.content LIKE \'%\' || je.value || \'%\')')
+    .join(' OR ')
 
   const sql = `
     SELECT m.id, m.kind, m.content, s.kind AS scopeKind, m.confidence

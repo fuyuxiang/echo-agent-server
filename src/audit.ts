@@ -28,8 +28,8 @@ export type AuditAction =
 /**
  * 审计写入。
  *
- * 同步写但不抛错:审计失败绝不能让业务请求失败,而合规要求又不允许静默
- * 丢弃 —— 折中是失败时打到 stderr,让运维能从进程日志里发现问题。
+ * 异步写且不阻塞主链路:audit 失败绝不阻塞业务请求,但也不允许静默
+ * 丢失 —— 失败时进 stderr 与内存失败计数,让运维可观测。
  *
  * 不记录检索到的具体内容,只记 who/when/what,避免审计表本身变成一份
  * 绕过权限的知识副本。
@@ -40,28 +40,53 @@ export function makeAudit(db: DB, onError?: (e: unknown) => void) {
      VALUES (?,?,?,?,?,?,?)`
   )
 
-  return function audit(
+  function write(
     req: FastifyRequest | null,
     action: AuditAction,
     target?: string,
     detail?: Record<string, unknown>
   ): void {
-    try {
-      const actor = req ? (req as AuthedRequest).claims?.sub ?? null : null
-      const ip = req?.ip ?? null
-      stmt.run(
-        randomUUID(),
-        actor,
-        action,
-        target ?? null,
-        detail ? JSON.stringify(detail) : null,
-        ip,
-        Date.now()
-      )
-    } catch (e) {
-      onError?.(e)
-    }
+    const actor = req ? (req as AuthedRequest).claims?.sub ?? null : null
+    const ip = req?.ip ?? null
+    stmt.run(
+      randomUUID(),
+      actor,
+      action,
+      target ?? null,
+      detail ? JSON.stringify(detail) : null,
+      ip,
+      Date.now()
+    )
   }
+
+  // 队列 + setImmediate 异步落库:主链路返回前不会等 SQLite。
+  // 失败:log 写到 stderr 并计数;队列继续滚动,绝不阻塞业务。
+  let pending = 0
+  const failures = { count: 0 }
+
+  function audit(
+    req: FastifyRequest | null,
+    action: AuditAction,
+    target?: string,
+    detail?: Record<string, unknown>
+  ): void {
+    pending += 1
+    setImmediate(() => {
+      pending -= 1
+      try {
+        write(req, action, target, detail)
+      } catch (e) {
+        failures.count += 1
+        onError?.(e)
+        // eslint-disable-next-line no-console
+        console.error(`[audit] 写入失败 (累计 ${failures.count}):`, e)
+      }
+    })
+  }
+
+  /** 仅在测试中同步写一次,避免测试结束前还没落库。 */
+  ;(audit as unknown as { _sync?: typeof write })._sync = write
+  return audit as typeof audit & { _sync?: typeof write }
 }
 
 export interface AuditQuery {
