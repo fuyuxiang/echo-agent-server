@@ -7,14 +7,20 @@ import type { AuthedRequest } from '../auth/jwt.js'
 const RetrieveSchema = z.object({
   query: z.string().min(1, 'query 不能为空'),
   limit: z.coerce.number().int().min(1).max(50).optional(),
+  // snake_case 与方案 §4.2 契约一致。保留 camelCase 别名以兼容旧桌面端。
+  multi_hop: z.boolean().optional(),
   multiHop: z.boolean().optional(),
+  token_budget: z.coerce.number().int().min(500).max(32000).optional(),
   tokenBudget: z.coerce.number().int().min(500).max(32000).optional(),
   /** 显式限定 scope 类别:'org' = 全公司,'team' = 当前用户可见的团队层。undefined = 全部。 */
   scopes: z.array(z.enum(['org', 'team'])).optional(),
   filters: z
     .object({
       tags: z.array(z.string()).optional(),
+      // source_types / sourceTypes 双名
+      source_types: z.array(z.string()).optional(),
       sourceTypes: z.array(z.string()).optional(),
+      scope_kinds: z.array(z.enum(['org', 'team'])).optional(),
       scopeKinds: z.array(z.enum(['org', 'team'])).optional()
     })
     .optional()
@@ -62,12 +68,28 @@ export function registerRetrieveRoutes(app: FastifyInstance): void {
       return reply.code(400).send(fail(4001, `参数错误: ${parsed.error.issues[0]?.message}`))
     }
     const claims = (req as AuthedRequest).claims
-    const res = await retriever.retrieve(claims.sub, parsed.data)
+    // snake_case 优先(camelCase 兼容):把方案契约字段喂给内部接口。
+    const body = parsed.data
+    const normalized = {
+      query: body.query,
+      limit: body.limit,
+      multiHop: body.multi_hop ?? body.multiHop,
+      tokenBudget: body.token_budget ?? body.tokenBudget,
+      scopes: body.scopes,
+      filters: body.filters
+        ? {
+            tags: body.filters.tags,
+            sourceTypes: body.filters.source_types ?? body.filters.sourceTypes,
+            scopeKinds: body.filters.scope_kinds ?? body.filters.scopeKinds
+          }
+        : undefined
+    }
+    const res = await retriever.retrieve(claims.sub, normalized)
 
     // 只记 who/what/多少条,不记检索到的内容 —— 审计表不该变成一份
     // 绕过权限的知识副本。
     app.audit(req, 'retrieve', undefined, {
-      queryLen: parsed.data.query.length,
+      queryLen: body.query.length,
       hits: res.chunks.length,
       totalMs: res.diagnostics.totalMs
     })

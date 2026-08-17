@@ -271,11 +271,12 @@ function buildServer(deps: McpDeps, userId: string): McpServer {
                JOIN documents d ON d.owner_id = u.id
               WHERE d.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})
                 AND d.status = 'ready'
+                AND d.sensitivity <= ?
                 AND u.status = 'active'
               GROUP BY u.id
               ORDER BY n DESC LIMIT 5`
           )
-          .all(...ctx.scopeIds) as typeof rows
+          .all(...ctx.scopeIds, ctx.clearance) as typeof rows
       }
 
       return {

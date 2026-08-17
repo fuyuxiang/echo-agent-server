@@ -5,3 +5,8 @@ dist/
 .env.local
 # eval 产物是 CI 运行产物,不入库(由 actions/upload-artifact 归档)
 eval/reports/
+# 运行期生成的数据库/日志/pid 文件不入库
+data/
+logs/
+run/
+

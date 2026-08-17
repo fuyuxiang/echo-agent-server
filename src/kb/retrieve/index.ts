@@ -50,6 +50,8 @@ export interface RetrievedChunk {
   scopeKind: string
   modality: string
   sourceType: string
+  /** L1/L2/L3 来源层级。L1 由桌面端合并层补,服务端只发 L2/L3。 */
+  source?: 'L1' | 'L2' | 'L3'
   citation: Citation
   owner: { id: string; displayName: string } | null
   stale: boolean
@@ -306,6 +308,8 @@ export class Retriever {
         scopeKind: c.scopeKind,
         modality: c.modality,
         sourceType: c.sourceType,
+        // 来源层级:L2 = 团队,L3 = 组织。L1 由桌面端合并层补。
+        source: c.scopeKind === 'team' ? 'L2' : 'L3',
         citation: {
           page: c.locPage,
           heading: c.heading ?? '',
@@ -333,12 +337,13 @@ export class Retriever {
            JOIN users u ON u.id = d.owner_id
           WHERE d.scope_id IN (${placeholders})
             AND d.status = 'ready'
+            AND d.sensitivity <= ?
             AND u.status = 'active'
           GROUP BY u.id
           ORDER BY n DESC
           LIMIT 3`
       )
-      .all(...ctx.scopeIds) as { userId: string; displayName: string }[]
+      .all(...ctx.scopeIds, ctx.clearance) as { userId: string; displayName: string }[]
 
     return rows.map((r) => ({
       ...r,
