@@ -92,6 +92,11 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
       Date.now()
     )
 
+    app.audit(req, 'promotion_create', id, {
+      payloadType,
+      source,
+      targetScope
+    })
     return reply.send(ok({ promotionId: id, state: 'pending' }))
   })
 
@@ -312,6 +317,7 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
       if (info.changes === 0) {
         return reply.code(404).send(fail(4041, '记录不存在或已处理'))
       }
+      app.audit(req, 'promotion_withdraw', id)
       return reply.send(ok({ state: 'withdrawn' }))
     }
   )

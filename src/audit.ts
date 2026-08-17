@@ -17,6 +17,13 @@ export type AuditAction =
   | 'user_change'
   | 'llm_chat'
   | 'conflict_resolve'
+  | 'sync'
+  | 'doc_read'
+  | 'doc_reindex'
+  | 'memory_patch'
+  | 'memory_retire'
+  | 'promotion_create'
+  | 'promotion_withdraw'
 
 /**
  * 审计写入。

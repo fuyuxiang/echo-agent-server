@@ -270,6 +270,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
 
     const STAGES = ['pending', 'parsing', 'chunking', 'embedding', 'ready']
     const idx = STAGES.indexOf(doc.status)
+    app.audit(req, 'doc_read', id, { kind: 'status' })
     return reply.send(
       ok({
         status: doc.status,
@@ -364,6 +365,83 @@ export function registerDocsRoutes(app: FastifyInstance): void {
           rawUrl: doc.storageKey ? `/api/v1/docs/${id}/raw` : null
         })
       )
+    }
+  )
+
+  /**
+   * 文档段落拉取(REST,非 raw)。
+   *
+   *   POST /api/v1/docs/fetch  body: { doc_id, page?, range? }
+   *
+   * 插件 echo-agent-org 的 OrgFetchDocTool 用这条端点替代 MCP 路径,
+   * 让 agentic 检索时也能取段落而非只 raw。
+   * 与 MCP org_fetch_doc 行为一致 —— 同样权限校验、同样支持二进制类型。
+   */
+  app.post(
+    '/api/v1/docs/fetch',
+    { preHandler: app.authenticate },
+    async (req, reply) => {
+      const parsed = z
+        .object({
+          docId: z.string().min(1),
+          page: z.number().int().positive().optional(),
+          range: z.string().regex(/^-?\d+:-?\d+$/).optional()
+        })
+        .safeParse(req.body ?? {})
+      if (!parsed.success) {
+        return reply
+          .code(400)
+          .send(fail(4001, `参数错误: ${parsed.error.issues[0]?.message ?? '未知'}`))
+      }
+      const claims = (req as AuthedRequest).claims
+      const ctx = loadAccessContext(db, claims.sub)
+      if (!canAccessDocument(db, ctx, parsed.data.docId)) {
+        return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
+      }
+
+      const doc = db
+        .prepare(
+          'SELECT source_type AS sourceType, title FROM documents WHERE id = ?'
+        )
+        .get(parsed.data.docId) as
+        | { sourceType: string; title: string }
+        | undefined
+      if (!doc) return reply.code(404).send(fail(4041, '文档不存在'))
+
+      const isBinary = ['pdf', 'docx', 'pptx', 'xlsx', 'image', 'audio', 'video'].includes(
+        doc.sourceType
+      )
+      if (isBinary) {
+        return reply.send(
+          ok({
+            docId: parsed.data.docId,
+            text: '',
+            note: '二进制文档;请通过 /api/v1/docs/:id/raw 获取原始文件'
+          })
+        )
+      }
+
+      const params: unknown[] = [parsed.data.docId]
+      let where = 'doc_id = ?'
+      if (parsed.data.page !== undefined) {
+        where += ' AND loc_page = ?'
+        params.push(parsed.data.page)
+      } else if (parsed.data.range) {
+        const [a, b] = parsed.data.range.split(':').map(Number)
+        const lo = Math.max(0, Math.min(a, b))
+        const hi = Math.max(a, b)
+        where += ' AND seq BETWEEN ? AND ?'
+        params.push(lo, hi)
+      }
+      const rows = db
+        .prepare(
+          `SELECT seq, text, heading, loc_page AS locPage, loc_start_ms AS locStartMs,
+                  loc_end_ms AS locEndMs
+             FROM chunks WHERE ${where} ORDER BY seq LIMIT 200`
+        )
+        .all(...params) as Record<string, unknown>[]
+      const text = rows.map((r) => r.text).join('\n\n')
+      return reply.send(ok({ docId: parsed.data.docId, text, chunks: rows }))
     }
   )
 
@@ -470,6 +548,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
       }
       enqueueIngest(db, id)
+      app.audit(req, 'doc_reindex', id)
       return reply.send(ok({ queued: true }))
     }
   )

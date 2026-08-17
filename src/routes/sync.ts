@@ -163,6 +163,16 @@ export function registerSyncRoutes(app: FastifyInstance): void {
       revokedDocs.length >= limit * 2 ||
       revokedMemories.length >= limit
 
+    app.audit(req, 'sync', undefined, {
+      deviceId,
+      cursor,
+      docs: docs.length,
+      memories: memories.length,
+      revokedDocs: revokedDocIds.length,
+      revokedMemories: revokedMemIds.length,
+      purgeAll: ctx.scopeIds.length === 0
+    })
+
     return reply.send(
       ok({
         nextCursor,

@@ -91,6 +91,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       sets.push('updated_at = ?')
       params.push(Date.now())
       db.prepare(`UPDATE org_memories SET ${sets.join(', ')} WHERE id = ?`).run(...params, id)
+      app.audit(req, 'memory_patch', id, { fields: Object.keys(v) })
       return reply.send(ok({ updated: true }))
     }
   )
@@ -116,6 +117,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
         Date.now(),
         id
       )
+      app.audit(req, 'memory_retire', id)
       return reply.send(ok({ retired: true }))
     }
   )

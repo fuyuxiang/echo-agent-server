@@ -1,12 +1,7 @@
 node_modules/
 dist/
-*.db
+*.tsbuildinfo
 .env
-
-# 运行时产物
-run/
-logs/
-data/
-
-# macOS
-.DS_Store
+.env.local
+# eval 产物是 CI 运行产物,不入库(由 actions/upload-artifact 归档)
+eval/reports/

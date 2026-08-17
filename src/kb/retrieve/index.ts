@@ -23,6 +23,14 @@ export interface RetrieveRequest {
   /** 多跳:生成子查询分别召回后合并。由客户端的 router 判定后传入。 */
   multiHop?: boolean
   tokenBudget?: number
+  /**
+   * 显式 scope 子集。undefined = 服务端按用户实时可见全集;
+   * `['org']` = 仅组织层;`['team']` = 仅用户可见的团队层;'local' 不应在这里传。
+   *
+   * 即使客户端传入,服务端仍按"用户可见 scope � 请求 scope"做交集,
+   * 防止越权。
+   */
+  scopes?: Array<'org' | 'team'>
 }
 
 export interface Citation {
@@ -106,6 +114,28 @@ export class Retriever {
     // 无可见 scope(用户被禁用或不属于任何组且无 org scope):直接空结果。
     if (ctx.scopeIds.length === 0) {
       return this.empty(t0)
+    }
+
+    // 服务端按"用户可见 scope � 客户端请求 scope"二次收敛。
+    // 即使客户端误传越权 scope,这里也会被裁掉。
+    if (req.scopes && req.scopes.length > 0) {
+      const kindOf = (sid: string): 'org' | 'team' | null => {
+        const r = this.deps.db
+          .prepare('SELECT kind FROM scopes WHERE id = ?')
+          .get(sid) as { kind: string } | undefined
+        if (!r) return null
+        return r.kind === 'org' || r.kind === 'team' ? r.kind : null
+      }
+      const filtered: string[] = []
+      for (const sid of ctx.scopeIds) {
+        const kind = kindOf(sid)
+        if (kind !== null && req.scopes.includes(kind)) filtered.push(sid)
+      }
+      if (filtered.length === 0) {
+        return this.empty(t0)
+      }
+      // 重写 ctx.scopeIds,后续 SQL 内联权限使用新值。
+      ;(ctx as { scopeIds: string[] }).scopeIds = filtered
     }
 
     const queries = req.multiHop ? this.subQueries(req.query) : [req.query]

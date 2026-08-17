@@ -9,6 +9,8 @@ const RetrieveSchema = z.object({
   limit: z.coerce.number().int().min(1).max(50).optional(),
   multiHop: z.boolean().optional(),
   tokenBudget: z.coerce.number().int().min(500).max(32000).optional(),
+  /** 显式限定 scope 类别:'org' = 全公司,'team' = 当前用户可见的团队层。undefined = 全部。 */
+  scopes: z.array(z.enum(['org', 'team'])).optional(),
   filters: z
     .object({
       tags: z.array(z.string()).optional(),
