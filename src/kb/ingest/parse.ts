@@ -3,6 +3,9 @@ import type { Block } from './chunk.js'
 import type { SourceType } from '../types.js'
 import { textParser } from '../parsers/text.js'
 import { docxParser } from '../parsers/docx.js'
+import { pptxParser } from '../parsers/pptx.js'
+import { xlsxParser } from '../parsers/xlsx.js'
+import { imageParser, imageCaptionParser } from '../parsers/image.js'
 import { pdfParser } from '../parsers/pdf.js'
 import { audioParser, videoParser, mediaParserFor } from '../parsers/media.js'
 import type { ParserUnit } from '../parsers/types.js'
@@ -129,6 +132,25 @@ export async function parseDocument(
       const units = await docxParser.parse(buf, { docId, fileName })
       return { blocks: units.map(unitToBlock), pageCount: null }
     }
+    case 'pptx': {
+      const units = await pptxParser.parse(buf, { docId, fileName })
+      return {
+        blocks: units.map(unitToBlock),
+        pageCount: new Set(units.map((u) =>
+          u.location.kind === 'page_section' ? u.location.page : 0
+        )).size || null
+      }
+    }
+    case 'xlsx': {
+      const units = await xlsxParser.parse(buf, { docId, fileName })
+      return { blocks: units.map(unitToBlock), pageCount: null }
+    }
+    case 'image': {
+      // 图片默认走 caption 通道:无 VLM 时产出占位 caption,后续接入真实
+      // VLM 后这里改为 caption-only 路径。
+      const units = await imageCaptionParser.parse(buf, { docId, fileName })
+      return { blocks: units.map(unitToBlock), pageCount: null }
+    }
     case 'audio': {
       const units = await audioParser.parse(buf, { docId, fileName })
       return { blocks: units.map(unitToBlock), pageCount: null }
@@ -147,8 +169,6 @@ export async function parseDocument(
       return { blocks: units.map(unitToBlock), pageCount: pages.size || null }
     }
     default:
-      // pptx / xlsx / image / audio / video 的解析器尚未实现。明确抛错而不是
-      // 静默产出空内容 —— 后者会让文档停在 ready 却永远检索不到。
       throw new Error(`暂不支持的文档类型: ${sourceType}`)
   }
 }
@@ -156,10 +176,18 @@ export async function parseDocument(
 const EXT_MAP: Record<string, SourceType> = {
   '.pdf': 'pdf',
   '.docx': 'docx',
+  '.pptx': 'pptx',
+  '.xlsx': 'xlsx',
   '.md': 'md',
   '.markdown': 'md',
   '.txt': 'txt',
   '.text': 'txt',
+  '.png': 'image',
+  '.jpg': 'image',
+  '.jpeg': 'image',
+  '.gif': 'image',
+  '.webp': 'image',
+  '.bmp': 'image',
   '.mp3': 'audio',
   '.wav': 'audio',
   '.m4a': 'audio',

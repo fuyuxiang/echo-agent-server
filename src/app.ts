@@ -1,6 +1,9 @@
 import Fastify, { type FastifyInstance } from 'fastify'
 import jwt from '@fastify/jwt'
 import multipart from '@fastify/multipart'
+import cors from '@fastify/cors'
+import helmet from '@fastify/helmet'
+import rateLimit from '@fastify/rate-limit'
 import type { DB } from './db/index.js'
 import type { Config } from './config.js'
 import { createEmbedder } from './models/embedder.js'
@@ -16,6 +19,7 @@ import { registerAdminRoutes } from './routes/admin.js'
 import { registerDocsRoutes } from './routes/docs.js'
 import { registerPromotionRoutes } from './routes/promotions.js'
 import { registerMemoryRoutes } from './routes/memories.js'
+import { registerLlmRoutes } from './routes/llm.js'
 import { registerSyncRoutes } from './routes/sync.js'
 import { registerQualityRoutes } from './routes/quality.js'
 import { registerMcpRoutes } from './mcp.js'
@@ -57,12 +61,46 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
     retriever:
       opts.overrides?.retriever ??
       new Retriever({ db, cfg, embedder, reranker, log }),
-    throttle: opts.overrides?.throttle ?? new LoginThrottle(),
+    // eval/CI 模式禁用登录限流:同一 IP+username 在 1 分钟内会跑过 5 次,
+    // 内存限流会把 fixture 创建流程锁死。生产保留默认行为。
+    throttle:
+      opts.overrides?.throttle ??
+      (process.env.ECHO_DISABLE_LOGIN_THROTTLE === '1'
+        ? { check: () => 0, recordFailure: () => undefined, recordSuccess: () => undefined }
+        : new LoginThrottle()),
     ...opts.overrides
   }
 
   app.decorate('deps', deps)
   app.decorate('audit', makeAudit(db, (e) => warn(`审计写入失败: ${String(e)}`)))
+
+  // 安全中间件:helmet 给一组安全的默认响应头;CORS 仅允许显式白名单
+  // origin;rate-limit 默认对所有路由启用,具体路由按 per-route 配置
+  // 覆盖阈值。生产必须配 ECHO_CORS_ORIGINS,默认空表示"无跨域"。
+  app.register(helmet, {
+    // CSP 由 Fastify 静态服务管理,这里关闭默认 CSP,避免影响管理后台。
+    contentSecurityPolicy: false
+  })
+  const corsOrigins = (cfg.corsOrigins ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  app.register(cors, {
+    origin: corsOrigins.length > 0 ? corsOrigins : false,
+    credentials: true,
+    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS']
+  })
+  // 默认限流:对所有路由启用 200/min,作为粗粒度保护;具体路由会在
+  // registerRetrieveRoutes/registerAuthRoutes 内通过 per-route config
+  // 覆盖到方案要求的阈值。
+  app.register(rateLimit, {
+    max: 200,
+    timeWindow: '1 minute',
+    // 匿名请求(无 Authorization)统一按 IP 限流;有 token 的请求在路由
+    // 里按 sub 二次覆盖。这里不区分,保持简单。
+    keyGenerator: (req) => req.ip
+  })
+
   app.register(jwt, { secret: cfg.jwtSecret })
   app.register(multipart, { limits: { fileSize: cfg.maxUploadBytes, files: 1 } })
   app.decorate('authenticate', makeAuthenticate(db))
@@ -89,6 +127,7 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   registerDocsRoutes(app)
   registerPromotionRoutes(app)
   registerMemoryRoutes(app)
+  registerLlmRoutes(app)
   registerSyncRoutes(app)
   registerQualityRoutes(app)
   registerMcpRoutes(app, {

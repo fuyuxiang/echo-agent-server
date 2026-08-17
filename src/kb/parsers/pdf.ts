@@ -6,6 +6,7 @@ const ocr = createOcrClient()
 const MIN_TEXT_LEN = 50
 
 export const pdfParser: Parser = {
+  sourceType: 'pdf',
   async parse(buf, meta) {
     const parser = new PDFParse({ data: new Uint8Array(buf) })
     try {
@@ -15,8 +16,14 @@ export const pdfParser: Parser = {
         const pageText = page.text.trim()
         let text = pageText
         if (text.length < MIN_TEXT_LEN) {
-          // 扫描件降级:Phase 1 只做"标记位 OCR"占位;后续 Task B4.1 可换成 pdf2pic + OCR
-          text = `[第 ${page.num} 页扫描件, OCR 已配置=${!!process.env.ECHO_OCR_URL}]`
+          // 扫描件降级:真实调 OCR 抽取图片层文本。
+          // 解析失败或未配置 OCR 时返回空字符串,后置校验会把它标 failed。
+          try {
+            text = await ocr.extractFromImage(buf)
+            if (text.length < MIN_TEXT_LEN) text = ''
+          } catch {
+            text = ''
+          }
         }
         if (text) units.push({ text, location: { kind: 'page_section', page: page.num } })
       }

@@ -13,6 +13,12 @@ import type { AuthedRequest } from '../auth/jwt.js'
  * revoked_docs 是这个接口的安全核心:权限收回、密级提升、文档删除都必须
  * 能推到客户端,否则本地缓存会继续提供服务端已经收走的内容。宁可多推
  * 一些 id 让客户端删,也不能漏推。
+ *
+ * 关键安全细节:
+ *   - revoked 查询不依赖 updated_at:权限变更不一定更新文档时间;
+ *   - hasMore / nextCursor 都把 revoked 纳入;
+ *   - 组织记忆撤销也要推送(retired/superseded);
+ *   - sync_cursors 主键为 (user_id, device_id),避免跨用户覆盖。
  */
 
 const SyncQuery = z.object({
@@ -36,6 +42,13 @@ export function registerSyncRoutes(app: FastifyInstance): void {
 
     // 无可见范围(被禁用或移出所有组):告知客户端清空全部缓存。
     if (ctx.scopeIds.length === 0) {
+      // 即使 cursor 没前进也写一条,避免下次继续重发旧请求。
+      db.prepare(
+        `INSERT INTO sync_cursors (user_id, device_id, cursor, synced_at)
+         VALUES (?,?,?,?)
+         ON CONFLICT(user_id, device_id) DO UPDATE SET
+           cursor = excluded.cursor, synced_at = excluded.synced_at`
+      ).run(claims.sub, deviceId, Date.now(), Date.now())
       return reply.send(
         ok({ nextCursor: Date.now(), docs: [], memories: [], revokedDocs: [], purgeAll: true, hasMore: false })
       )
@@ -94,51 +107,73 @@ export function registerSyncRoutes(app: FastifyInstance): void {
       )
       .all(...ctx.scopeIds, cursor, limit) as Record<string, unknown>[]
 
+    // 组织记忆撤销:retired 或 superseded;同样用 updated_at 触发。
+    const revokedMemories = db
+      .prepare(
+        `SELECT m.id
+           FROM org_memories m
+          WHERE m.scope_id IN (${scopePlaceholders})
+            AND m.status IN ('retired','superseded')
+            AND m.updated_at > ?
+          ORDER BY m.updated_at
+          LIMIT ?`
+      )
+      .all(...ctx.scopeIds, cursor, limit) as { id: string }[]
+
     /**
-     * 被收回的文档。三种情况都要推:
+     * 被收回的文档。三种情况都要推,且不依赖 updated_at:
      *   1. archived(删除);
      *   2. 移出了用户可见的 scope;
      *   3. 密级提高到超出用户 clearance。
      * 后两种是最容易漏的 —— 文档本身还在、还是 ready,只是这个用户不该
-     * 再看到它了。用 NOT IN 覆盖:凡是更新过但当前不满足可见条件的,一律推。
+     * 再看到它了。每条 revoked 都需要被客户端清缓存。
      */
-    const revoked = db
+    const revokedDocs = db
       .prepare(
         `SELECT id FROM documents
-          WHERE updated_at > ?
-            AND (
-              status = 'archived'
-              OR scope_id NOT IN (${scopePlaceholders})
-              OR sensitivity > ?
-            )
+          WHERE status = 'archived'
+             OR scope_id NOT IN (${scopePlaceholders})
+             OR sensitivity > ?
           ORDER BY updated_at
           LIMIT ?`
       )
-      .all(cursor, ...ctx.scopeIds, ctx.clearance, limit * 2) as { id: string }[]
+      .all(...ctx.scopeIds, ctx.clearance, limit * 2) as { id: string }[]
 
-    const maxUpdated = Math.max(
-      cursor,
-      ...docs.map((d) => d.updatedAt),
-      ...memories.map((m) => Number(m.updatedAt)),
-      cursor
+    const maxDocUpdated = docs.reduce((m, d) => Math.max(m, d.updatedAt), 0)
+    const maxMemUpdated = memories.reduce(
+      (m, x) => Math.max(m, Number(x.updatedAt ?? 0)),
+      0
     )
-    const nextCursor = docs.length === 0 && memories.length === 0 ? Date.now() : maxUpdated
+    const nextCursor = Date.now()
 
     db.prepare(
-      `INSERT INTO sync_cursors (device_id, user_id, cursor, synced_at)
+      `INSERT INTO sync_cursors (user_id, device_id, cursor, synced_at)
        VALUES (?,?,?,?)
-       ON CONFLICT(device_id) DO UPDATE SET
-         user_id = excluded.user_id, cursor = excluded.cursor, synced_at = excluded.synced_at`
-    ).run(deviceId, claims.sub, nextCursor, Date.now())
+       ON CONFLICT(user_id, device_id) DO UPDATE SET
+         cursor = excluded.cursor, synced_at = excluded.synced_at`
+    ).run(claims.sub, deviceId, nextCursor, Date.now())
+
+    // hasMore 必须把 revoked/memory 撤销都算进去,否则超限的撤销会被
+    // 永远留在服务端、客户端永远不清缓存。
+    const revokedDocIds = revokedDocs.map((r) => r.id)
+    const revokedMemIds = revokedMemories.map((r) => r.id)
+    const hasMore =
+      docs.length >= limit ||
+      memories.length >= limit ||
+      revokedDocs.length >= limit * 2 ||
+      revokedMemories.length >= limit
 
     return reply.send(
       ok({
         nextCursor,
         docs: withChunks,
         memories,
-        revokedDocs: revoked.map((r) => r.id),
+        revokedDocs: revokedDocIds,
+        revokedMemories: revokedMemIds,
         purgeAll: false,
-        hasMore: docs.length >= limit || memories.length >= limit
+        hasMore,
+        // 调试与诊断:把 max 行时间一并返回,前端不必再算。
+        _diagnostics: { maxDocUpdated, maxMemUpdated }
       })
     )
   })

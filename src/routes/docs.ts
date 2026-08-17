@@ -12,6 +12,7 @@ const ListQuery = z.object({
   scopeId: z.string().optional(),
   status: z.string().optional(),
   q: z.string().optional(),
+  tag: z.string().optional().describe('按标签精确筛选'),
   page: z.coerce.number().int().min(1).default(1),
   size: z.coerce.number().int().min(1).max(100).default(20)
 })
@@ -122,7 +123,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
   app.get('/api/v1/docs', { preHandler: app.authenticate }, async (req, reply) => {
     const parsed = ListQuery.safeParse(req.query ?? {})
     if (!parsed.success) return reply.code(400).send(fail(4001, '查询参数错误'))
-    const { scopeId, status, q, page, size } = parsed.data
+    const { scopeId, status, q, tag, page, size } = parsed.data
 
     const claims = (req as AuthedRequest).claims
     const ctx = loadAccessContext(db, claims.sub)
@@ -149,6 +150,12 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       where.push('d.title LIKE ?')
       params.push(`%${q}%`)
     }
+    if (tag) {
+      // 标签筛选走 EXISTS 而非 IN 子查询,SQLite planner 会更愿意走 doc_tags.tag
+      // 上的索引(就算没有专门建索引,doc_tags 也很小,N+1 可避免)。
+      where.push('EXISTS (SELECT 1 FROM doc_tags t WHERE t.doc_id = d.id AND t.tag = ?)')
+      params.push(tag)
+    }
 
     const whereSql = where.join(' AND ')
     const total = (
@@ -157,7 +164,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         .get(...params) as { n: number }
     ).n
 
-    const items = db
+    const rows = db
       .prepare(
         `SELECT d.id, d.title, d.source_type AS sourceType, d.status, d.fail_reason AS failReason,
                 d.byte_size AS byteSize, d.sensitivity, d.volatility, d.version,
@@ -172,7 +179,27 @@ export function registerDocsRoutes(app: FastifyInstance): void {
           ORDER BY d.updated_at DESC
           LIMIT ? OFFSET ?`
       )
-      .all(...params, size, (page - 1) * size)
+      .all(...params, size, (page - 1) * size) as (Record<string, unknown> & {
+      id: string
+    })[]
+
+    // 单独收集 tags:N+1 可避免 —— 一条 SQL 拉所有 doc 的 tag,内存里按 doc_id 聚合。
+    // 列表里的 doc 可能成百上千,逐 doc 查 doc_tags 会把读放大数百倍。
+    const ids = rows.map((r) => r.id)
+    const tagsByDoc = new Map<string, string[]>()
+    if (ids.length > 0) {
+      const tagRows = db
+        .prepare(
+          `SELECT doc_id AS docId, tag FROM doc_tags WHERE doc_id IN (${ids.map(() => '?').join(',')})`
+        )
+        .all(...ids) as { docId: string; tag: string }[]
+      for (const r of tagRows) {
+        const list = tagsByDoc.get(r.docId)
+        if (list) list.push(r.tag)
+        else tagsByDoc.set(r.docId, [r.tag])
+      }
+    }
+    const items = rows.map((r) => ({ ...r, tags: tagsByDoc.get(r.id) ?? [] }))
 
     return reply.send(ok({ items, total, page, size }))
   })
@@ -211,13 +238,29 @@ export function registerDocsRoutes(app: FastifyInstance): void {
     const { id } = req.params as { id: string }
     const claims = (req as AuthedRequest).claims
     const ctx = loadAccessContext(db, claims.sub)
-    if (!canAccessDocument(db, ctx, id)) {
+
+    // 状态接口需要看到 pending/parsing/chunking/embedding 等中间态才能让
+    // 管理员观察进度 —— canAccessDocument 强制 status='ready' 会在这一阶段
+    // 误返 404。这里单独校验 scope + sensitivity(对 archived/不存在仍然 404)。
+    const row = db
+      .prepare(
+        'SELECT scope_id AS scopeId, sensitivity, status FROM documents WHERE id = ?'
+      )
+      .get(id) as { scopeId: string; sensitivity: number; status: string } | undefined
+    if (
+      !row ||
+      row.status === 'archived' ||
+      !canAccessScope(ctx, row.scopeId) ||
+      row.sensitivity > ctx.clearance
+    ) {
       return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
     }
 
-    const doc = db
-      .prepare('SELECT status, fail_reason AS failReason FROM documents WHERE id = ?')
-      .get(id) as { status: string; failReason: string | null }
+    const doc = { status: row.status, failReason: null as string | null }
+    const jobRow = db
+      .prepare('SELECT fail_reason AS failReason FROM documents WHERE id = ?')
+      .get(id) as { failReason: string | null } | undefined
+    doc.failReason = jobRow?.failReason ?? null
     const job = db
       .prepare(
         `SELECT stage, state, attempts, last_error AS lastError
@@ -236,6 +279,93 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       })
     )
   })
+
+  /**
+   * 文档内容查看。
+   *
+   *   GET /api/v1/docs/:id/content?page=N&range=seqStart:seqEnd&format=raw
+   *
+   * 与 /raw 的区别:/raw 永远返回完整原始文件(用于下载),/content 优先返回
+   * 已分块文本(用于引用点击后的段落定位)。对 PDF/DOCX 等二进制类型,/content
+   * 给出"请通过 /raw 获取"的提示并附 raw URL —— 服务端不做 PDF 解析,
+   * 引用定位交给桌面端 PDF/媒体查看器。
+   */
+  app.get(
+    '/api/v1/docs/:id/content',
+    { preHandler: app.authenticate },
+    async (req, reply) => {
+      const { id } = req.params as { id: string }
+      const claims = (req as AuthedRequest).claims
+      const ctx = loadAccessContext(db, claims.sub)
+      if (!canAccessDocument(db, ctx, id)) {
+        return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
+      }
+
+      const q = req.query as { page?: string; range?: string; format?: string }
+      const wantRaw = q.format === 'raw'
+
+      const doc = db
+        .prepare(
+          'SELECT source_type AS sourceType, storage_key AS storageKey, title FROM documents WHERE id = ?'
+        )
+        .get(id) as { sourceType: string; storageKey: string | null; title: string } | undefined
+      if (!doc) return reply.code(404).send(fail(4041, '文档不存在'))
+
+      const isBinary = ['pdf', 'docx', 'pptx', 'xlsx', 'image', 'audio', 'video'].includes(
+        doc.sourceType
+      )
+
+      if (wantRaw || isBinary) {
+        return reply.send(
+          ok({
+            docId: id,
+            title: doc.title,
+            sourceType: doc.sourceType,
+            text: null,
+            chunks: [],
+            rawUrl: doc.storageKey ? `/api/v1/docs/${id}/raw` : null,
+            note: isBinary
+              ? '二进制文档;请通过 /api/v1/docs/:id/raw 获取原始文件'
+              : undefined
+          })
+        )
+      }
+
+      // 文本类:按 page / seq 切片返回 chunks。优先 page,否则按 range。
+      const params: unknown[] = [id]
+      let where = 'doc_id = ?'
+      if (q.page) {
+        where += ' AND loc_page = ?'
+        params.push(Number(q.page))
+      } else if (q.range) {
+        const m = /^(-?\d+):(-?\d+)$/.exec(q.range)
+        if (!m) return reply.code(400).send(fail(4001, 'range 必须是 start:end'))
+        const a = Math.max(0, Number(m[1]))
+        const b = Math.max(a, Number(m[2]))
+        where += ' AND seq BETWEEN ? AND ?'
+        params.push(a, b)
+      }
+      const chunks = db
+        .prepare(
+          `SELECT id, seq, text, heading, loc_page AS locPage, loc_start_ms AS locStartMs,
+                  loc_end_ms AS locEndMs
+             FROM chunks WHERE ${where} ORDER BY seq LIMIT 200`
+        )
+        .all(...params) as Record<string, unknown>[]
+
+      const text = chunks.map((c) => c.text).join('\n\n')
+      return reply.send(
+        ok({
+          docId: id,
+          title: doc.title,
+          sourceType: doc.sourceType,
+          text,
+          chunks,
+          rawUrl: doc.storageKey ? `/api/v1/docs/${id}/raw` : null
+        })
+      )
+    }
+  )
 
   /** 原始文件下载。权限校验不可省 —— 这是绕过检索直接取内容的路径。 */
   app.get('/api/v1/docs/:id/raw', { preHandler: app.authenticate }, async (req, reply) => {
@@ -274,6 +404,21 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       }
 
       const v = parsed.data
+
+      // scope 与 sensitivity 调整是授权边界变化,不允许 curator 跨范围移动
+      // 或扩大可见性 —— 否则一个可访问某文档的 curator 可以把文档移入
+      // 其他团队、或把"机密"降到"公开"。仅 admin 可改这两项。
+      if (v.scopeId !== undefined && claims.role !== 'admin') {
+        return reply.code(403).send(fail(4036, '修改可见范围仅管理员可操作'))
+      }
+      if (v.scopeId !== undefined) {
+        const exists = db.prepare('SELECT 1 FROM scopes WHERE id = ?').get(v.scopeId)
+        if (!exists) return reply.code(400).send(fail(4001, '目标 scope 不存在'))
+      }
+      if (v.sensitivity !== undefined && claims.role !== 'admin') {
+        return reply.code(403).send(fail(4036, '修改密级仅管理员可操作'))
+      }
+
       const sets: string[] = []
       const params: unknown[] = []
       if (v.title !== undefined) { sets.push('title = ?'); params.push(v.title) }
@@ -306,6 +451,10 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         }
       })()
 
+      app.audit(req, 'patch', id, {
+        changed: Object.keys(v),
+        role: claims.role
+      })
       return reply.send(ok({ updated: true }))
     }
   )
@@ -322,6 +471,114 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       }
       enqueueIngest(db, id)
       return reply.send(ok({ queued: true }))
+    }
+  )
+
+  /**
+   * 新版本上传。
+   *
+   *   POST /api/v1/docs/:id/new-version  (multipart: file)
+   *
+   * 不修改旧文档的 chunks,新建一条 documents 行:
+   *   - `supersedes_id` 指向旧版本;
+   *   - `version` 在旧版基础上 +1;
+   *   - 入摄取流水线重新生成 chunks/vectors;
+   *   - 旧版 doc 与 chunks 保留(archived='no'),可继续被旧引用读到。
+   *
+   * 权限:沿用 PATCH 的策略 —— scope 与 sensitivity 由 admin 控制,这里
+   * 只校验调用者对旧 doc 可见,新 doc 沿用旧 doc 的 scope/sensitivity。
+   */
+  app.post(
+    '/api/v1/docs/:id/new-version',
+    { preHandler: [app.authenticate, requireCurator] },
+    async (req, reply) => {
+      const oldId = (req.params as { id: string }).id
+      const claims = (req as AuthedRequest).claims
+      const ctx = loadAccessContext(db, claims.sub)
+      if (claims.role !== 'admin' && !canAccessDocument(db, ctx, oldId)) {
+        return reply.code(404).send(fail(4041, '原文档不存在或无权访问'))
+      }
+
+      const old = db
+        .prepare(
+          `SELECT scope_id AS scopeId, sensitivity, sensitivity AS sens,
+                  owner_id AS ownerId, version, source_type AS sourceType, title
+             FROM documents WHERE id = ?`
+        )
+        .get(oldId) as
+        | {
+            scopeId: string
+            sensitivity: number
+            ownerId: string | null
+            version: number
+            sourceType: string
+            title: string
+          }
+        | undefined
+      if (!old) return reply.code(404).send(fail(4041, '原文档不存在'))
+
+      const data = await req.file({ limits: { fileSize: cfg.maxUploadBytes } })
+      if (!data) return reply.code(400).send(fail(4001, '缺少文件'))
+      const fileName = data.filename ?? 'untitled'
+      // 必须与旧版本文件类型一致 —— 否则检索合并时 chunk 形态不一致。
+      const newSourceType = sourceTypeFromName(fileName)
+      if (newSourceType !== old.sourceType) {
+        return reply
+          .code(415)
+          .send(fail(4152, `新版本必须与旧版本同类型 (${old.sourceType})`))
+      }
+      const buf = await data.toBuffer()
+      if (data.file.truncated) {
+        return reply
+          .code(413)
+          .send(fail(4131, `文件超过上限 ${Math.floor(cfg.maxUploadBytes / 1048576)}MB`))
+      }
+      const hash = createHash('sha256').update(buf).digest('hex')
+      const ext = fileName.slice(fileName.lastIndexOf('.') + 1)
+      const storageKey = await storage.put(buf, ext)
+      const newDocId = randomUUID()
+      const now = Date.now()
+      const title =
+        (data.fields as Record<string, { value?: string } | undefined>).title?.value?.trim() ||
+        `${old.title} (v${old.version + 1})`
+
+      db.prepare(
+        `INSERT INTO documents (id, scope_id, title, source_type, storage_key, content_hash,
+                                byte_size, owner_id, sensitivity, volatility, status,
+                                supersedes_id, version, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)`
+      ).run(
+        newDocId,
+        old.scopeId,
+        title,
+        old.sourceType,
+        storageKey,
+        hash,
+        buf.length,
+        old.ownerId ?? claims.sub,
+        old.sensitivity,
+        'stable',
+        oldId,
+        old.version + 1,
+        now,
+        now
+      )
+
+      enqueueIngest(db, newDocId)
+      app.audit(req, 'upload', newDocId, {
+        title,
+        supersedes: oldId,
+        bytes: buf.length
+      })
+      return reply.send(
+        ok({
+          docId: newDocId,
+          supersedesId: oldId,
+          version: old.version + 1,
+          status: 'pending',
+          dedup: false
+        })
+      )
     }
   )
 

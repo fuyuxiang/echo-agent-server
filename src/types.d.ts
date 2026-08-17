@@ -8,6 +8,12 @@ import type { Reranker } from './models/reranker.js'
 import type { Storage } from './kb/storage/index.js'
 import type { AuditAction } from './audit.js'
 
+export interface ThrottleLike {
+  check(key: string): number
+  recordFailure(key: string): void
+  recordSuccess(key: string): void
+}
+
 export interface Deps {
   db: DB
   cfg: Config
@@ -15,7 +21,7 @@ export interface Deps {
   reranker: Reranker
   storage: Storage
   retriever: Retriever
-  throttle: LoginThrottle
+  throttle: ThrottleLike
 }
 
 declare module 'fastify' {

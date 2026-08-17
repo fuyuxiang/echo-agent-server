@@ -1,6 +1,7 @@
 import type { Parser, ParserUnit } from './types.js'
 
 export const textParser: Parser = {
+  sourceType: 'txt',
   async parse(buf) {
     const text = buf.toString('utf8')
     const paras = text.split(/\n\s*\n/).map(s => s.trim()).filter(Boolean)

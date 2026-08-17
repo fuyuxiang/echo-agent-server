@@ -328,6 +328,7 @@ describe('文档路由', () => {
       url: `/api/v1/docs/${docId}/status`,
       headers: bearer(token)
     })
+    expect(pending.statusCode).toBe(200)
     expect(pending.json().data.status).toBe('pending')
 
     await drain({ db, cfg, embedder: createEmbedder(cfg) })

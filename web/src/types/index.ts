@@ -85,6 +85,8 @@ export interface DocumentItem {
   scopeName: string
   ownerName: string | null
   chunkCount: number
+  /** 列表接口一并返回,避免 N+1 */
+  tags: string[]
 }
 
 export interface DocListResult {

@@ -36,7 +36,21 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     }
   }
 
-  app.post('/api/v1/auth/login', async (req, reply) => {
+  // 登录限流:方案 5.6 要求 5/min。Fastify 路由级 config.rateLimit 覆盖
+  // 全局默认。匿名请求按 IP + username 联合 key。
+  app.post(
+    '/api/v1/auth/login',
+    {
+      config: {
+        rateLimit: {
+          max: cfg.rateLimitLoginPerMin > 0 ? cfg.rateLimitLoginPerMin : 1000,
+          timeWindow: '1 minute',
+          keyGenerator: (req) =>
+            `${req.ip}:${(req.body as { username?: string })?.username ?? 'anon'}`
+        }
+      }
+    },
+    async (req, reply) => {
     const parsed = LoginSchema.safeParse(req.body ?? {})
     if (!parsed.success) return reply.code(400).send(fail(4001, '缺少用户名或密码'))
     const { username, password, deviceId } = parsed.data
@@ -85,7 +99,8 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     return reply.send(
       ok({ accessToken, refreshToken, user: sessionPayload(row.id) })
     )
-  })
+    }
+  )
 
   app.post('/api/v1/auth/refresh', async (req, reply) => {
     const parsed = RefreshSchema.safeParse(req.body ?? {})

@@ -28,6 +28,7 @@ export default function Documents() {
   const [scopes, setScopes] = useState<Scope[]>([])
   const [scopeFilter, setScopeFilter] = useState<string | undefined>()
   const [keyword, setKeyword] = useState('')
+  const [tagFilter, setTagFilter] = useState('')
   const [loading, setLoading] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
   const timer = useRef<number | null>(null)
@@ -35,7 +36,13 @@ export default function Documents() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await api.listDocs({ page, size: 20, scopeId: scopeFilter, q: keyword || undefined })
+      const res = await api.listDocs({
+        page,
+        size: 20,
+        scopeId: scopeFilter,
+        q: keyword || undefined,
+        tag: tagFilter || undefined
+      })
       setItems(res.items)
       setTotal(res.total)
     } finally {
@@ -66,11 +73,21 @@ export default function Documents() {
       title: '标题',
       dataIndex: 'title',
       render: (t: string, r: DocumentItem) => (
-        <Space direction="vertical" size={0}>
+        <Space direction="vertical" size={4}>
           <span>{t}</span>
           <span style={{ fontSize: 12, color: '#999' }}>
             {r.sourceType} · {fmtBytes(r.byteSize)} · {r.chunkCount} 个片段
           </span>
+          {r.tags.length > 0 && (
+            <Space size={4} wrap>
+              {r.tags.map((t) => (
+                // 标签本身不敏感,但它们会让"看见存在"成为间接泄露
+                // (如"董事会"标签出现就知道有相关文档) —— 与标题同权限,
+                // 列表的 scope 过滤已经守住。
+                <Tag key={t}>{t}</Tag>
+              ))}
+            </Space>
+          )}
         </Space>
       ),
     },

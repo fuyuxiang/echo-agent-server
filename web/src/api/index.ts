@@ -74,6 +74,7 @@ export const listDocs = (params: {
   scopeId?: string
   status?: string
   q?: string
+  tag?: string
   page?: number
   size?: number
 }): Promise<DocListResult> => client.get('/api/v1/docs', { params })

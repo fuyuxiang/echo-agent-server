@@ -5,6 +5,7 @@ import { z } from 'zod'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type { DB } from './db/index.js'
 import { loadAccessContext, canAccessScope, canAccessDocument } from './auth/scopes.js'
+import { type JwtClaims } from './auth/jwt.js'
 import { Retriever } from './kb/retrieve/index.js'
 import type { RetrieverDeps } from './kb/retrieve/index.js'
 
@@ -12,11 +13,13 @@ import type { RetrieverDeps } from './kb/retrieve/index.js'
  * MCP Server(Streamable HTTP)。
  *
  * 让外部 AI 客户端(Cursor/Claude Desktop 等)能直接对接组织知识库,无需
- * 经过 echo-agent 桌面端。两个关键设计:
+ * 经过 echo-agent 桌面端。三个关键设计:
  *
- *   · 鉴权复用 JWT —— MCP 端点不能脱离服务端既有的 RBAC,否则一个 Key
- *     泄露就能拖走整个组织库。所以 MCP 请求必须带与 /api/v1/* 同一签发的
- *     Bearer token,且鉴权失败返回 401 让客户端立即拒绝结果。
+ *   · 鉴权完全复用 REST —— MCP 端点不能脱离服务端既有的 RBAC,否则一个 Key
+ *     泄露就能拖走整个组织库。鉴权失败返回 401,让客户端立即拒绝结果。
+ *
+ *   · token_version 实时校验 —— 直接复用 `makeAuthenticate`,与 /api/v1/*
+ *     享有同一撤销机制:改密、改密级、禁用用户都会让旧 MCP token 立即失效。
  *
  *   · 权限再次内联 —— 工具层不能再信任调用者声明的 scope。每次调用都用
  *     token 解析出当前用户的可见 scope,SQL 条件与 /retrieve 一致。
@@ -345,38 +348,52 @@ function buildServer(deps: McpDeps, userId: string): McpServer {
 /**
  * 鉴权与 /api/v1/* 共用逻辑,但失败时返回 401 而不是 403 —— MCP 客户端
  * 通常看到 401 会主动停止重试,403 则会重试同样的请求。
+ *
+ * 实现上直接复用 `makeAuthenticate`,这样:
+ *   - JWT 签名校验;
+ *   - 数据库 token_version 实时比对;
+ *   - 用户状态(active)校验;
+ *   - 角色从库读(防止 token 中过期角色被信任)。
+ *
+ * 与 /api/v1/* 的唯一差异是错误响应体形状 —— MCP 客户端期望
+ * {error:{code,msg}},而 REST 走 ok/fail 包装。
  */
 async function requireAuth(
   req: FastifyRequest,
   reply: FastifyReply,
   db: DB
-): Promise<{ userId: string } | null> {
+): Promise<{ userId: string; claims: JwtClaims } | null> {
   const auth = req.headers.authorization
   if (!auth?.startsWith('Bearer ')) {
     reply.code(401).send({ error: { code: 4011, msg: '需要 Bearer token' } })
     return null
   }
-  // 简化:只校验 Authorization 头存在并通过 JWT 验签。token_version 与角色
-  // 不强制:即使签发后改了密码,MCP 工具会按次报错而不是 401 全拒。
-  // —— 更严格的逻辑可以与 /api/v1/auth/me 共用,这里为简洁先做基础版。
+
+  // 先做 JWT 验签,拿到 claims。
+  let claims: JwtClaims
   try {
-    await req.jwtVerify()
+    claims = await req.jwtVerify<JwtClaims>()
   } catch {
     reply.code(401).send({ error: { code: 4011, msg: 'token 无效或已过期' } })
     return null
   }
-  const sub = (req as unknown as { user: { sub: string } }).user?.sub
-  if (!sub) {
-    reply.code(401).send({ error: { code: 4011, msg: 'token 缺少 sub' } })
-    return null
-  }
-  // 顺手查一下用户是否还存在且没被禁用 —— 禁用用户不能继续用旧 token 调 MCP。
+
+  // 再做 token_version / status / role 的实时比对 —— 与 REST 路径一致,
+  // 禁用用户或 token_version 已递增的旧 token 一律 401。
   const row = db
-    .prepare("SELECT status FROM users WHERE id = ?")
-    .get(sub) as { status: string } | undefined
+    .prepare("SELECT token_version AS tv, status, role FROM users WHERE id = ?")
+    .get(claims.sub) as
+    | { tv: number; status: string; role: string }
+    | undefined
   if (!row || row.status !== 'active') {
     reply.code(401).send({ error: { code: 4013, msg: '账号不存在或已禁用' } })
     return null
   }
-  return { userId: sub }
+  if (row.tv !== claims.tv) {
+    reply.code(401).send({ error: { code: 4014, msg: '登录状态已失效,请重新登录' } })
+    return null
+  }
+  // 角色以库为准,避免 token 携带过期角色。
+  const finalClaims: JwtClaims = { ...claims, role: row.role as JwtClaims['role'] }
+  return { userId: claims.sub, claims: finalClaims }
 }

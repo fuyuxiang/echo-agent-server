@@ -184,6 +184,7 @@ function blocksToUnits(blocks: Block[]): ParserUnit[] {
 }
 
 export const audioParser: Parser = {
+  sourceType: 'audio',
   async parse(buf, meta) {
     const tmpDir = await mkdtemp(join(tmpdir(), 'echo-audio-'))
     try {
@@ -201,6 +202,7 @@ export const audioParser: Parser = {
 }
 
 export const videoParser: Parser = {
+  sourceType: 'video',
   async parse(buf, meta) {
     const tmpDir = await mkdtemp(join(tmpdir(), 'echo-video-'))
     try {

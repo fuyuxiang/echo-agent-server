@@ -1,0 +1,73 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci --no-audit --no-fund
+
+      - name: 编译
+        run: npm run build
+
+      - name: 单元测试
+        run: npm test
+
+  web-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: echo-agent-server/web/package-lock.json
+      - working-directory: web
+        run: npm ci --no-audit --no-fund
+      - working-directory: web
+        run: npm test -- --run
+
+  eval:
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+
+      # 跑评估:env 注入满足配置要求;ECHO_DISABLE_LOGIN_THROTTLE 关闭登录限流;
+      # ECHO_DISABLE_LOGIN_THROTTLE=1 让 eval 跑得过 fixture 准备。
+      - name: 跑黄金评估集
+        env:
+          ECHO_JWT_SECRET: 'eval-ci-secret-with-enough-length-32'
+          ECHO_MASTER_KEY: 'eval-ci-master-key-base64-padded'
+          ECHO_ADMIN_USER: admin
+          ECHO_ADMIN_PASSWORD: 'admin-pw-12345-ci'
+          ECHO_EVAL_USERS: 'u_member_1:um1-pw,u_member_2:um2-pw,u_member_fin:ufin-pw'
+          ECHO_RATE_LIMIT_RETRIEVE: '0'
+          ECHO_RATE_LIMIT_LLM: '0'
+        run: bash eval/ci.sh
+
+      - name: 上传报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: echo-agent-server/eval/reports/
+          if-no-files-found: ignore

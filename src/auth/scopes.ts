@@ -50,8 +50,16 @@ export function canAccessDocument(
   docId: string
 ): boolean {
   const row = db
-    .prepare('SELECT scope_id, sensitivity FROM documents WHERE id = ?')
-    .get(docId) as { scope_id: string; sensitivity: number } | undefined
+    .prepare(
+      `SELECT scope_id AS scopeId, sensitivity, status
+         FROM documents WHERE id = ?`
+    )
+    .get(docId) as { scopeId: string; sensitivity: number; status: string } | undefined
   if (!row) return false
-  return canAccessScope(ctx, row.scope_id) && row.sensitivity <= ctx.clearance
+  // archived 文档不再通过按 id 的接口提供访问 —— 软删除要求"立即从知识
+  // 访问路径中消失",而保留 doc 行只是为了审计与 supersedes 链可追溯。
+  // 检索链路本来就走 scope + status='ready',此处补齐让 raw/content/MCP
+  // fetch 与检索语义一致。
+  if (row.status !== 'ready') return false
+  return canAccessScope(ctx, row.scopeId) && row.sensitivity <= ctx.clearance
 }

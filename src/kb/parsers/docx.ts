@@ -18,6 +18,7 @@ function htmlToBlocks(html: string): HtmlBlock[] {
 }
 
 export const docxParser: Parser = {
+  sourceType: 'docx',
   async parse(buf) {
     const { value: html } = await mammoth.convertToHtml({ buffer: buf })
     return htmlToBlocks(html).map<ParserUnit>(b => {

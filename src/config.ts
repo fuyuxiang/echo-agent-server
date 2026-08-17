@@ -27,6 +27,12 @@ const Schema = z.object({
   rerankUrl: z.string().optional(),
   rerankKey: z.string().optional(),
 
+  // OCR / VLM 远端服务(可选)。不配则扫描件与图片落到占位实现,失败显式化
+  // 而非静默产出空索引。
+  ocrUrl: z.string().optional(),
+  vlmUrl: z.string().optional(),
+  vlmKey: z.string().optional(),
+
   maxUploadBytes: z.coerce.number().int().positive().default(200 * 1024 * 1024),
   // volatile 文档超过这个天数即在答案里标注"可能过时"
   staleDays: z.coerce.number().int().positive().default(90),
@@ -34,7 +40,16 @@ const Schema = z.object({
   initialAdminUser: z.string().default('admin'),
   initialAdminPassword: z.string().optional(),
 
+  // CORS 白名单:逗号分隔的 origin。生产必须配置,留空则拒绝跨域,
+  // 避免浏览器侧被任意来源访问。
   corsOrigins: z.string().optional(),
+
+  // 限流阈值。覆盖方案 5.6:retrieve 60/min、llm 20/min、login 5/min。
+  // 设置为 0 表示禁用该限流(测试/开发场景)。
+  rateLimitRetrievePerMin: z.coerce.number().int().nonnegative().default(60),
+  rateLimitLlmPerMin: z.coerce.number().int().nonnegative().default(20),
+  rateLimitLoginPerMin: z.coerce.number().int().nonnegative().default(5),
+
   logLevel: z.string().default('info')
 })
 
@@ -58,11 +73,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     embedKey: env.ECHO_EMBED_KEY,
     rerankUrl: env.ECHO_RERANK_URL,
     rerankKey: env.ECHO_RERANK_KEY,
+    ocrUrl: env.ECHO_OCR_URL,
+    vlmUrl: env.ECHO_VLM_URL,
+    vlmKey: env.ECHO_VLM_KEY,
     maxUploadBytes: env.ECHO_MAX_UPLOAD_BYTES,
     staleDays: env.ECHO_STALE_DAYS,
     initialAdminUser: env.ECHO_ADMIN_USER,
     initialAdminPassword: env.ECHO_ADMIN_PASSWORD,
     corsOrigins: env.ECHO_CORS_ORIGINS,
+    rateLimitRetrievePerMin: env.ECHO_RATE_LIMIT_RETRIEVE,
+    rateLimitLlmPerMin: env.ECHO_RATE_LIMIT_LLM,
+    rateLimitLoginPerMin: env.ECHO_RATE_LIMIT_LOGIN,
     logLevel: env.ECHO_LOG_LEVEL
   })
 

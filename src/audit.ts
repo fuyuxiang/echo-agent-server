@@ -10,10 +10,13 @@ export type AuditAction =
   | 'retrieve'
   | 'upload'
   | 'delete'
+  | 'patch'
   | 'approve'
   | 'reject'
   | 'config_change'
   | 'user_change'
+  | 'llm_chat'
+  | 'conflict_resolve'
 
 /**
  * 审计写入。
