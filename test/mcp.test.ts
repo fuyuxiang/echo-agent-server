@@ -144,7 +144,7 @@ async function callTool(
       'content-type': 'application/json',
       accept: 'application/json, text/event-stream',
       authorization: `Bearer ${token}`,
-      // stateless:不发送 sessionId
+      'mcp-session-id': sessionId
     },
     payload: {
       jsonrpc: '2.0',
@@ -154,7 +154,6 @@ async function callTool(
     }
   })
   const body = res.body
-  // Streamable HTTP 返回 SSE 风格:data: {...}\n\n
   const dataLine = body
     .split('\n')
     .find((l) => l.startsWith('data: '))

@@ -24,6 +24,11 @@ import type { RetrieverDeps } from './kb/retrieve/index.js'
  *   · 权限再次内联 —— 工具层不能再信任调用者声明的 scope。每次调用都用
  *     token 解析出当前用户的可见 scope,SQL 条件与 /retrieve 一致。
  *     模型可能在工具描述里写"仅返回有权访问的内容",但这是自律不是边界。
+ *
+ * 会话管理:
+ *   - 客户端 initialize 时服务端生成 sessionId,通过 mcp-session-id 头回传;
+ *   - 后续 POST/GET/DELETE 携带同一 sessionId,服务端按会话复用 McpServer 实例;
+ *   - DELETE 显式终止;无活动 5 分钟自动清理。
  */
 
 interface McpDeps {
@@ -42,24 +47,97 @@ export function registerMcpRoutes(app: FastifyInstance, deps: McpDeps): void {
    * 超时清理等),对一次性调用过于复杂,且会让客户端实现必须跟踪 sessionId。
    * 这里用 Streamable HTTP 的"无状态"模式 —— 每个请求都当一次新的会话。
    */
+  /**
+   * 会话池:key = sessionId,value = { server, transport, userId, lastUsed }。
+   * 5 分钟无活动自动 GC;DELETE 显式终止。
+   */
+  const sessions = new Map<
+    string,
+    { server: McpServer; transport: StreamableHTTPServerTransport; userId: string; lastUsed: number }
+  >()
+  const SESSION_TTL_MS = 5 * 60_000
+
+  function gcSessions(): void {
+    const now = Date.now()
+    for (const [sid, s] of sessions) {
+      if (now - s.lastUsed > SESSION_TTL_MS) {
+        void s.transport.close().catch(() => undefined)
+        void s.server.close().catch(() => undefined)
+        sessions.delete(sid)
+      }
+    }
+  }
+
   app.post('/mcp', async (req: FastifyRequest, reply: FastifyReply) => {
-    // MCP 端点也走鉴权。复用 /api/v1/* 的 token 验证,让 MCP 与 REST 权限一致。
+    gcSessions()
     const auth = await requireAuth(req, reply, deps.db)
     if (!auth) return
 
-    const server = buildServer(deps, auth.userId)
-    const transport = new StreamableHTTPServerTransport({
-      // 无状态:不在响应里带 sessionId,每次请求都重新初始化
-      sessionIdGenerator: undefined
-    })
-    await server.connect(transport)
+    const sessionHeader = req.headers['mcp-session-id']
+    const existingSid = typeof sessionHeader === 'string' ? sessionHeader : undefined
+    const existing = existingSid ? sessions.get(existingSid) : undefined
+
+    if (existing && existing.userId !== auth.userId) {
+      // 同一 sessionId 被另一个用户复用:直接拒绝(防止会话劫持)。
+      reply.code(403).send({ error: { code: 4031, msg: 'session 与当前用户不匹配' } })
+      return
+    }
+
+    let server: McpServer
+    let transport: StreamableHTTPServerTransport
+    let sid: string
+
+    if (existing) {
+      server = existing.server
+      transport = existing.transport
+      sid = existingSid!
+      existing.lastUsed = Date.now()
+    } else {
+      server = buildServer(deps, auth.userId)
+      sid = randomUUID()
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => sid
+      })
+      await server.connect(transport)
+      sessions.set(sid, { server, transport, userId: auth.userId, lastUsed: Date.now() })
+      // 把 sessionId 暴露到响应头(initialize 响应会带;后续通知也用)。
+      reply.hijack()
+      ;(reply.raw as unknown as { setHeader: (k: string, v: string) => void }).setHeader(
+        'mcp-session-id',
+        sid
+      )
+    }
+
     try {
       await transport.handleRequest(req.raw, reply.raw, req.body)
     } finally {
-      // transport.close 之后 server 才能断开;否则 MCP 客户端会收到 stream 截断错误
-      await transport.close()
-      await server.close()
+      // initialize 完成后 transport 才接管;关闭由会话 GC 处理。
+      // 仅在客户端主动 DELETE 时才立即关闭;普通调用完成后让会话复用。
+      void 0
     }
+  })
+
+  app.delete('/mcp', async (req: FastifyRequest, reply: FastifyReply) => {
+    const auth = await requireAuth(req, reply, deps.db)
+    if (!auth) return
+    const sid = req.headers['mcp-session-id']
+    if (typeof sid !== 'string') {
+      reply.code(400).send({ error: { code: 4001, msg: '缺少 mcp-session-id' } })
+      return
+    }
+    const s = sessions.get(sid)
+    if (!s) {
+      reply.code(404).send({ error: { code: 4041, msg: '会话不存在或已过期' } })
+      return
+    }
+    if (s.userId !== auth.userId) {
+      reply.code(403).send({ error: { code: 4031, msg: '无权终止该会话' } })
+      return
+    }
+    await s.transport.close().catch(() => undefined)
+    await s.server.close().catch(() => undefined)
+    sessions.delete(sid)
+    reply.code(204).send()
   })
 }
 
