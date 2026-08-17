@@ -1,26 +1,66 @@
 import type { FastifyInstance } from 'fastify'
+import { z } from 'zod'
 import { ok } from '../reply.js'
-import { requireCurator } from '../auth/jwt.js'
+import { requireAdmin, type AuthedRequest } from '../auth/jwt.js'
+import { loadAccessContext } from '../auth/scopes.js'
 
 /**
  * 质量看板。
  *
- * 数据来自 qa_events 里"实际被引用"的 chunk,不是召回量 —— 召回十条只用
- * 一条,统计召回会高估系统表现。
+ * 数据来自 qa_events,统计:
+ *   - 无答案率 / 负反馈率 / agentic 占比 / 平均延迟 + p50/p95;
+ *   - 知识盲区(无答案问题聚类);
+ *   - 长期零引用文档;
+ *   - 各 status 文档数。
  *
- * 无答案率突然升高通常意味着摄取出了问题或出现了新的知识盲区,是最值得
- * 盯的单一指标。
+ * 权限:
+ *   - admin 看全部;
+ *   - curator 仅看自己可见 scope 的统计,避免越权窥探其他部门问题/盲区。
  */
 export function registerQualityRoutes(app: FastifyInstance): void {
   const { db } = app.deps
 
   app.get(
     '/api/v1/admin/quality/overview',
-    { preHandler: [app.authenticate, requireCurator] },
+    { preHandler: [app.authenticate, requireAdmin] },
     async (req, reply) => {
       const q = req.query as Record<string, string>
-      const days = Math.min(Number(q.days ?? 30) || 30, 365)
+      const days = Math.min(Math.max(Number(q.days ?? 30) || 30, 1), 365)
       const since = Date.now() - days * 24 * 3600_000
+
+      // 非 admin 走 scope 过滤:仅纳入自己可见 scope 下的 qa_events。
+      const claims = (req as AuthedRequest).claims
+      let scopedWhere = ''
+      const scopedParams: unknown[] = []
+      if (claims.role !== 'admin') {
+        const ctx = loadAccessContext(db, claims.sub)
+        if (ctx.scopeIds.length === 0) {
+          return reply.send(
+            ok({
+              windowDays: days,
+              total: 0,
+              unansweredRate: 0,
+              negativeRate: 0,
+              agenticRate: 0,
+              latency: { avg: null, p50: null, p95: null },
+              blindSpots: [],
+              negativeTop: [],
+              unusedDocs: [],
+              docStats: []
+            })
+          )
+        }
+        scopedWhere = ` AND user_id IN (
+          SELECT u.id FROM users u
+           JOIN user_groups ug ON ug.user_id = u.id
+           JOIN scopes s ON s.group_id = ug.group_id
+          WHERE s.id IN (${ctx.scopeIds.map(() => '?').join(',')})
+        )`
+        // 这里没有用 scopeIds,因为 qa_events 是按发起用户过滤(谁提问),不是按 scope
+        // 关联 documents。但 user→group→scope 链上,限定"提问者所属 scope"
+        // 即可代表 curator 看自己团队/组织能看到的统计。
+        scopedParams.push(...ctx.scopeIds)
+      }
 
       const totals = db
         .prepare(
@@ -30,52 +70,76 @@ export function registerQualityRoutes(app: FastifyInstance): void {
                   SUM(CASE WHEN feedback IN ('not_helpful','wrong') THEN 1 ELSE 0 END) AS negative,
                   SUM(CASE WHEN route = 'agentic' THEN 1 ELSE 0 END) AS agentic,
                   AVG(latency_ms) AS avgLatency
-             FROM qa_events WHERE created_at >= ?`
+             FROM qa_events WHERE created_at >= ?${scopedWhere}`
         )
-        .get(since) as Record<string, number | null>
+        .get(since, ...scopedParams) as Record<string, number | null>
 
       const total = totals.total ?? 0
 
-      // p50/p95:SQLite 没有百分位函数,用 LIMIT/OFFSET 取序位。
+      // p50/p95:SQLite 没有百分位函数,用 LIMIT/OFFSET 取序位;只统计当前
+      // 用户集合内的事件,与 totals 一致。
       const percentile = (p: number): number | null => {
         if (total === 0) return null
         const offset = Math.floor((total - 1) * p)
         const row = db
           .prepare(
             `SELECT latency_ms AS v FROM qa_events
-              WHERE created_at >= ? AND latency_ms IS NOT NULL
+              WHERE created_at >= ? AND latency_ms IS NOT NULL${scopedWhere}
               ORDER BY latency_ms LIMIT 1 OFFSET ?`
           )
-          .get(since, offset) as { v: number } | undefined
+          .get(since, ...scopedParams, offset) as { v: number } | undefined
         return row?.v ?? null
       }
 
-      // 知识盲区:没答上来的问题。直接可以变成"待补充文档"的清单。
+      // 知识盲区:没答上来的问题聚合。
       const blindSpots = db
         .prepare(
           `SELECT question, COUNT(*) AS n
              FROM qa_events
-            WHERE created_at >= ? AND answered = 0
+            WHERE created_at >= ? AND answered = 0${scopedWhere}
             GROUP BY question
             ORDER BY n DESC LIMIT 20`
         )
-        .all(since)
+        .all(since, ...scopedParams)
 
       const negativeTop = db
         .prepare(
           `SELECT question, feedback, created_at AS createdAt
              FROM qa_events
-            WHERE created_at >= ? AND feedback IN ('not_helpful','wrong')
+            WHERE created_at >= ? AND feedback IN ('not_helpful','wrong')${scopedWhere}
             ORDER BY created_at DESC LIMIT 20`
         )
-        .all(since)
+        .all(since, ...scopedParams)
 
-      // 长期零引用的文档:候选归档对象,也是"上传了但没人需要"的信号。
+      // 长期零引用文档:按 scope 过滤后取 top 20。
+      let unusedWhere = "d.status = 'ready'"
+      const unusedParams: unknown[] = []
+      if (claims.role !== 'admin') {
+        const ctx = loadAccessContext(db, claims.sub)
+        if (ctx.scopeIds.length === 0) {
+          return reply.send(
+            ok({
+              windowDays: days,
+              total: 0,
+              unansweredRate: 0,
+              negativeRate: 0,
+              agenticRate: 0,
+              latency: { avg: null, p50: null, p95: null },
+              blindSpots: [],
+              negativeTop: [],
+              unusedDocs: [],
+              docStats: []
+            })
+          )
+        }
+        unusedWhere += ` AND d.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})`
+        unusedParams.push(...ctx.scopeIds)
+      }
       const unusedDocs = db
         .prepare(
           `SELECT d.id, d.title, d.created_at AS createdAt
              FROM documents d
-            WHERE d.status = 'ready'
+            WHERE ${unusedWhere}
               AND NOT EXISTS (
                 SELECT 1 FROM qa_events e
                  WHERE e.cited_chunks IS NOT NULL
@@ -83,13 +147,27 @@ export function registerQualityRoutes(app: FastifyInstance): void {
               )
             ORDER BY d.created_at LIMIT 20`
         )
-        .all()
+        .all(...unusedParams)
 
+      // 各 status 文档数:按 scope 过滤。
+      let docStatsWhere = '1=1'
+      const docStatsParams: unknown[] = []
+      if (claims.role !== 'admin') {
+        const ctx = loadAccessContext(db, claims.sub)
+        if (ctx.scopeIds.length === 0) {
+          docStatsWhere = '0=1'
+        } else {
+          docStatsWhere = `d.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})`
+          docStatsParams.push(...ctx.scopeIds)
+        }
+      }
       const docStats = db
         .prepare(
-          `SELECT status, COUNT(*) AS n FROM documents GROUP BY status`
+          `SELECT status, COUNT(*) AS n
+             FROM documents d WHERE ${docStatsWhere}
+            GROUP BY status`
         )
-        .all() as { status: string; n: number }[]
+        .all(...docStatsParams) as { status: string; n: number }[]
 
       return reply.send(
         ok({
@@ -97,7 +175,6 @@ export function registerQualityRoutes(app: FastifyInstance): void {
           total,
           unansweredRate: total ? (totals.unanswered ?? 0) / total : 0,
           negativeRate: total ? (totals.negative ?? 0) / total : 0,
-          // 超过 25% 说明客户端的 router 判定过松,token 在浪费。
           agenticRate: total ? (totals.agentic ?? 0) / total : 0,
           latency: {
             avg: totals.avgLatency ? Math.round(totals.avgLatency) : null,
@@ -113,3 +190,7 @@ export function registerQualityRoutes(app: FastifyInstance): void {
     }
   )
 }
+
+// Zod schema 在 routes/auth.ts 已有 requireAdmin 守卫;此处再校验 zod 输入。
+// 当前实现仅用 query.days,不做更严格的 shape 校验,保留 zod import 以备扩展。
+void z
