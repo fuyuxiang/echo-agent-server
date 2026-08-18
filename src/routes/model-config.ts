@@ -3,6 +3,15 @@ import { z } from 'zod'
 import { ok, fail } from '../reply.js'
 import { encryptSecret, deriveKey } from '../crypto.js'
 import { requireAdmin, type AuthedRequest } from '../auth/jwt.js'
+import { loadConfigFromDb } from '../config.js'
+import { createEmbedder } from '../models/embedder.js'
+import { createReranker } from '../models/reranker.js'
+
+/** PUT 时的 warn,落到 stderr —— 与启动期 createEmbedder/createReranker 保持一致。 */
+const hotWarn = (m: string): void => {
+  // eslint-disable-next-line no-console
+  console.warn(`[echo-server] ${m}`)
+}
 
 const ROW_ID = 'default'
 
@@ -19,7 +28,7 @@ const PutSchema = z.object({
 })
 
 export function registerModelConfigRoutes(app: FastifyInstance): void {
-  const { db, cfg, embedder, reranker } = app.deps
+  const { db, cfg } = app.deps
   const masterKey = deriveKey(cfg.masterKey)
 
   /**
@@ -28,16 +37,24 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
    * 配置里的 embedModel 是"打算用什么",这里是"真正在跑什么" —— 未配置
    * ECHO_EMBED_URL 时后者是占位实现。两者不一致时管理端要能看出来,否则
    * 会把"检索质量差"归因到文档质量上。
+   *
+   * 关键:每次调用都从 app.deps 现读 embedder / reranker,而不是在注册时
+   * 解构出闭包常量 —— 因为 PUT 会替换 deps 上的实例,解构出来的旧引用会
+   * 永远指向"第一次启动时的"模型,让 GET 显示过期信息。
    */
-  const runtimeModels = (): Record<string, unknown> => ({
-    runtime: {
-      embedder: embedder.model,
-      semantic: embedder.semantic,
-      reranker: reranker.model,
-      crossEncoder: reranker.crossEncoder,
-      productionReady: embedder.semantic && reranker.crossEncoder
+  const runtimeModels = (): Record<string, unknown> => {
+    const e = app.deps.embedder
+    const r = app.deps.reranker
+    return {
+      runtime: {
+        embedder: e.model,
+        semantic: e.semantic,
+        reranker: r.model,
+        crossEncoder: r.crossEncoder,
+        productionReady: e.semantic && r.crossEncoder
+      }
     }
-  })
+  }
 
   /**
    * 客户端只拿到非敏感字段。
@@ -128,7 +145,20 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
         Date.now()
       )
 
-      app.audit(req, 'config_change', ROW_ID, { chatModel: v.chatModel })
+      // 热加载:把 DB 行覆盖到 cfg 后,立刻重建 embedder 与 reranker,
+      // 并赋回 app.deps。由于 Retriever(this.deps === app.deps)持有同一
+      // 对象引用,下一次请求会同时拿到新实例 —— 不需要锁,不需要重启。
+      const newCfg = loadConfigFromDb(db, cfg)
+      app.deps.cfg = newCfg
+      app.deps.embedder = createEmbedder(newCfg, hotWarn)
+      app.deps.reranker = createReranker(newCfg, hotWarn)
+
+      app.audit(req, 'config_change', ROW_ID, {
+        chatModel: v.chatModel,
+        embedModel: v.embedModel,
+        embedDim: v.embedDim,
+        rerankModel: v.rerankModel
+      })
       return reply.send(ok({ updated: true }))
     }
   )

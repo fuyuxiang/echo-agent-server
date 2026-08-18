@@ -125,4 +125,52 @@ describe('真实嵌入的错误处理', () => {
     await e.embedBatch(['x'])
     expect(captured.authorization).toBe('Bearer sk-test')
   })
+
+  // 5xx/超时必须让上层知道 —— 远端崩溃不应当被吞成 hash 兜底,
+  // 否则静默让"语义召回"永远查不到想要的文档,而管理员从 health 看不出来。
+  // 任务约束:不要自动回退到 hash,让上层决定。
+  it('5xx 远端错误透传抛出,不上落到 hash', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({}, 503))
+    vi.stubGlobal('fetch', fetchMock)
+    const e = createEmbedder(
+      testConfig({ embedUrl: 'https://embed.test/v1', embedDim: 1024 })
+    )
+    await expect(e.embed('hi')).rejects.toThrow(/embedding API 503/)
+    // 5xx 不是配置错误,允许重试 3 次;这里模式是 fetchMock 永不恢复
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+  })
+
+  it('远端超时(AbortError)抛出,不上落到 hash', async () => {
+    // 模拟 fetch 立即抛 AbortError(等价于真实超时);
+    // embedder 内部 retry 3 次,总耗时 ~2.5s,在测试 5s 限制内。
+    const fetchMock = vi.fn(async () => {
+      const err = new Error('aborted')
+        ; (err as Error & { name: string }).name = 'AbortError'
+      throw err
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const e = createEmbedder(
+      testConfig({ embedUrl: 'https://embed.test/v1', embedDim: 1024 })
+    )
+    await expect(e.embed('hi')).rejects.toThrow()
+  }, 15_000)
+})
+
+describe('HashEmbedder 行为不变', () => {
+  // 单元纯回归:无需 env,无需联网;约束保证不在重构里悄悄换实现。
+  it('同输入同输出;归一化后 L2 范数 ≈ 1', async () => {
+    const { createEmbedder } = await import('../../src/models/embedder.js')
+    const e = createEmbedder(testConfig({ embedDim: 64 }))
+    const v = await e.embed('差旅 报销 住宿')
+    const norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0))
+    expect(Math.abs(norm - 1)).toBeLessThan(1e-6)
+  })
+
+  it('空字符串的向量全 0,占位实现不抛错', async () => {
+    const { createEmbedder } = await import('../../src/models/embedder.js')
+    const e = createEmbedder(testConfig({ embedDim: 16 }))
+    const v = await e.embed('')
+    expect(v).toHaveLength(16)
+    expect(v.every((x) => x === 0)).toBe(true)
+  })
 })

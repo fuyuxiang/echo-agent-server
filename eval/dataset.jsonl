@@ -52,3 +52,103 @@
 {"id":"q048","kind":"permission","question":"员工福利","expected_doc_ids":["d_holiday_v2"],"expected_answer_points":[],"as_user":"u_member_1","must_not_leak":["d_fin_internal","d_board_secret"]}
 {"id":"q049","kind":"permission","question":"财务报销流程","expected_doc_ids":["d_reimburse_v3"],"expected_answer_points":[],"as_user":"u_member_fin","must_not_leak":["d_board_secret"]}
 {"id":"q050","kind":"permission","question":"绩效评估结果","expected_doc_ids":["d_perf_v3"],"expected_answer_points":[],"as_user":"u_member_1","must_not_leak":["d_fin_internal","d_board_secret"]}
+{"id":"q051","kind":"fact","question":"公司资产怎么编号","expected_doc_ids":["d_assets_v1"],"expected_answer_points":["AS-2024-001","部门领用"],"as_user":"u_member_1"}
+{"id":"q052","kind":"fact","question":"电子设备的折旧年限","expected_doc_ids":["d_assets_v1"],"expected_answer_points":["3 年"],"as_user":"u_member_1"}
+{"id":"q053","kind":"fact","question":"办公家具折旧几年","expected_doc_ids":["d_assets_v1"],"expected_answer_points":["5 年"],"as_user":"u_member_1"}
+{"id":"q054","kind":"fact","question":"资产报废由谁审批","expected_doc_ids":["d_assets_v1"],"expected_answer_points":["部门负责人","IT 复核"],"as_user":"u_member_1"}
+{"id":"q055","kind":"fact","question":"公司有哪些招聘渠道","expected_doc_ids":["d_recruit_v1"],"expected_answer_points":["内部推荐","猎头"],"as_user":"u_member_1"}
+{"id":"q056","kind":"fact","question":"招聘面试流程是怎样的","expected_doc_ids":["d_recruit_v1"],"expected_answer_points":["HR","部门负责人"],"as_user":"u_member_1"}
+{"id":"q057","kind":"fact","question":"新员工试用期多长","expected_doc_ids":["d_recruit_v1"],"expected_answer_points":["3-6 个月"],"as_user":"u_member_1"}
+{"id":"q058","kind":"fact","question":"加班申请流程是什么","expected_doc_ids":["d_overtime_v2"],"expected_answer_points":["OA","直属经理"],"as_user":"u_member_1"}
+{"id":"q059","kind":"fact","question":"周末加班换调休的比例","expected_doc_ids":["d_overtime_v2"],"expected_answer_points":["1.5 倍"],"as_user":"u_member_1"}
+{"id":"q060","kind":"fact","question":"每月加班上限多少小时","expected_doc_ids":["d_overtime_v2"],"expected_answer_points":["36 小时"],"as_user":"u_member_1"}
+{"id":"q061","kind":"fact","question":"工作手机话费报销额度","expected_doc_ids":["d_mobile_use"],"expected_answer_points":["100 元"],"as_user":"u_member_1"}
+{"id":"q062","kind":"fact","question":"访客需要出示什么证件","expected_doc_ids":["d_visitor_v1"],"expected_answer_points":["身份证件","前台"],"as_user":"u_member_1"}
+{"id":"q063","kind":"fact","question":"访客能不能进保密区域","expected_doc_ids":["d_visitor_v1"],"expected_answer_points":["陪同","不得进入"],"as_user":"u_member_1"}
+{"id":"q064","kind":"fact","question":"员工用什么 WiFi 名称","expected_doc_ids":["d_wifi_v1"],"expected_answer_points":["EchoCorp"],"as_user":"u_member_1"}
+{"id":"q065","kind":"fact","question":"访客使用哪个网络","expected_doc_ids":["d_wifi_v1"],"expected_answer_points":["EchoGuest"],"as_user":"u_member_1"}
+{"id":"q066","kind":"fact","question":"多少金额的礼品要申报","expected_doc_ids":["d_gift_v1"],"expected_answer_points":["200 元"],"as_user":"u_member_1"}
+{"id":"q067","kind":"fact","question":"加班到几点提供工作餐","expected_doc_ids":["d_meal_v1"],"expected_answer_points":["8 点","40 元"],"as_user":"u_member_1"}
+{"id":"q068","kind":"fact","question":"部门团建聚餐人均预算","expected_doc_ids":["d_meal_v1"],"expected_answer_points":["200 元"],"as_user":"u_member_1"}
+{"id":"q069","kind":"fact","question":"健康体检的年龄分组","expected_doc_ids":["d_health_v1"],"expected_answer_points":["40 岁","心血管"],"as_user":"u_member_1"}
+{"id":"q070","kind":"fact","question":"体检怎么预约","expected_doc_ids":["d_health_v1"],"expected_answer_points":["HR 系统","体检机构"],"as_user":"u_member_1"}
+{"id":"q071","kind":"fact","question":"异地调动的搬家补贴","expected_doc_ids":["d_relocation"],"expected_answer_points":["5000 元","3 个月"],"as_user":"u_member_1"}
+{"id":"q072","kind":"fact","question":"公司停车怎么收费","expected_doc_ids":["d_parking_v1"],"expected_answer_points":["200 元","半价"],"as_user":"u_member_1"}
+{"id":"q073","kind":"fact","question":"新能源车有什么停车优待","expected_doc_ids":["d_parking_v1"],"expected_answer_points":["地下车库","优先"],"as_user":"u_member_1"}
+{"id":"q074","kind":"fact","question":"员工申诉怎么提","expected_doc_ids":["d_grievance_v1"],"expected_answer_points":["HR","匿名"],"as_user":"u_member_1"}
+{"id":"q075","kind":"fact","question":"申诉多久回复","expected_doc_ids":["d_grievance_v1"],"expected_answer_points":["7 个工作日"],"as_user":"u_member_1"}
+{"id":"q076","kind":"fact","question":"员工档案保存多久","expected_doc_ids":["d_archive_v1"],"expected_answer_points":["5 年"],"as_user":"u_member_1"}
+{"id":"q077","kind":"fact","question":"合规档案保存几年","expected_doc_ids":["d_archive_v1"],"expected_answer_points":["10 年"],"as_user":"u_member_1"}
+{"id":"q078","kind":"fact","question":"公司公章谁来保管","expected_doc_ids":["d_notary_v1"],"expected_answer_points":["行政部","登记"],"as_user":"u_member_1"}
+{"id":"q079","kind":"fact","question":"用印流程是怎样的","expected_doc_ids":["d_notary_v1"],"expected_answer_points":["OA","法定代表人"],"as_user":"u_member_1"}
+{"id":"q080","kind":"fact","question":"公务用车怎么申请","expected_doc_ids":["d_vehicle_v1"],"expected_answer_points":["OA","行政部"],"as_user":"u_member_1"}
+{"id":"q081","kind":"fact","question":"公务出行油费怎么报","expected_doc_ids":["d_vehicle_v1"],"expected_answer_points":["实报实销","加油小票"],"as_user":"u_member_1"}
+{"id":"q082","kind":"fact","question":"办公区夏季空调温度","expected_doc_ids":["d_office_v1"],"expected_answer_points":["26 度"],"as_user":"u_member_1"}
+{"id":"q083","kind":"fact","question":"办公区冬季空调温度","expected_doc_ids":["d_office_v1"],"expected_answer_points":["22 度"],"as_user":"u_member_1"}
+{"id":"q084","kind":"fact","question":"工作时间是什么时候","expected_doc_ids":["d_attendance"],"expected_answer_points":["9:00-18:00","弹性半小时"],"as_user":"u_member_1"}
+{"id":"q085","kind":"fact","question":"迟到多久不扣款","expected_doc_ids":["d_attendance"],"expected_answer_points":["30 分钟"],"as_user":"u_member_1"}
+{"id":"q086","kind":"fact","question":"日常工作日着装","expected_doc_ids":["d_dress_code"],"expected_answer_points":["商务休闲"],"as_user":"u_member_1"}
+{"id":"q087","kind":"fact","question":"周五可以穿什么","expected_doc_ids":["d_dress_code"],"expected_answer_points":["休闲装"],"as_user":"u_member_1"}
+{"id":"q088","kind":"fact","question":"图书借阅一次几本","expected_doc_ids":["d_library"],"expected_answer_points":["2 本","30 天"],"as_user":"u_member_1"}
+{"id":"q089","kind":"fact","question":"部门团建多久一次","expected_doc_ids":["d_team_event"],"expected_answer_points":["季度"],"as_user":"u_member_1"}
+{"id":"q090","kind":"fact","question":"团建人均预算","expected_doc_ids":["d_team_event"],"expected_answer_points":["300 元"],"as_user":"u_member_1"}
+{"id":"q091","kind":"multi_hop","question":"新员工入职后多久可以申领资产","expected_doc_ids":["d_recruit_v1","d_assets_v1"],"expected_answer_points":["HR","部门领用"],"as_user":"u_member_1"}
+{"id":"q092","kind":"multi_hop","question":"加班调休与年假能否衔接","expected_doc_ids":["d_overtime_v2","d_holiday_v2"],"expected_answer_points":["调休","工龄"],"as_user":"u_member_1"}
+{"id":"q093","kind":"multi_hop","question":"访客带礼物需要走什么流程","expected_doc_ids":["d_visitor_v1","d_gift_v1"],"expected_answer_points":["申报","200 元"],"as_user":"u_member_1"}
+{"id":"q094","kind":"multi_hop","question":"加班餐与差旅餐补能否同时领取","expected_doc_ids":["d_meal_v1","d_travel_v3"],"expected_answer_points":["工作日 40","加班"],"as_user":"u_member_1"}
+{"id":"q095","kind":"multi_hop","question":"体检与请假怎么安排","expected_doc_ids":["d_health_v1","d_holiday_v2"],"expected_answer_points":["体检","年假"],"as_user":"u_member_1"}
+{"id":"q096","kind":"multi_hop","question":"员工申诉与处分记录的关系","expected_doc_ids":["d_grievance_v1","d_employment"],"expected_answer_points":["申诉","HR"],"as_user":"u_member_1"}
+{"id":"q097","kind":"multi_hop","question":"公章用印与合同审批的衔接","expected_doc_ids":["d_notary_v1","d_reimburse_v3"],"expected_answer_points":["OA","法定代表人"],"as_user":"u_member_1"}
+{"id":"q098","kind":"multi_hop","question":"团建与工作餐如何区分报销","expected_doc_ids":["d_team_event","d_meal_v1"],"expected_answer_points":["300 元","200 元"],"as_user":"u_member_1"}
+{"id":"q099","kind":"multi_hop","question":"着装与客户接待如何匹配","expected_doc_ids":["d_dress_code","d_meeting"],"expected_answer_points":["正装","会议室"],"as_user":"u_member_1"}
+{"id":"q100","kind":"multi_hop","question":"图书借阅与培训的关系","expected_doc_ids":["d_library","d_training"],"expected_answer_points":["借阅","必修"],"as_user":"u_member_1"}
+{"id":"q101","kind":"multi_hop","question":"着装规范与考勤有什么关系","expected_doc_ids":["d_dress_code","d_attendance"],"expected_answer_points":["商务休闲","9:00-18:00"],"as_user":"u_member_1"}
+{"id":"q102","kind":"multi_hop","question":"办公环境与节能的关系","expected_doc_ids":["d_office_v1","d_office_v1"],"expected_answer_points":["26 度","22 度"],"as_user":"u_member_1"}
+{"id":"q103","kind":"multi_hop","question":"停车与用车能否同时报销","expected_doc_ids":["d_parking_v1","d_vehicle_v1"],"expected_answer_points":["200 元","加油小票"],"as_user":"u_member_1"}
+{"id":"q104","kind":"multi_hop","question":"档案管理与离职交接的衔接","expected_doc_ids":["d_archive_v1","d_employment"],"expected_answer_points":["5 年","HR"],"as_user":"u_member_1"}
+{"id":"q105","kind":"multi_hop","question":"加班上限与绩效评估","expected_doc_ids":["d_overtime_v2","d_perf_v3"],"expected_answer_points":["36 小时","季度"],"as_user":"u_member_1"}
+{"id":"q106","kind":"multi_hop","question":"新员工入职与资产领用","expected_doc_ids":["d_onboarding","d_assets_v1"],"expected_answer_points":["领设备","AS-2024-001"],"as_user":"u_member_1"}
+{"id":"q107","kind":"multi_hop","question":"招聘渠道与内部推荐奖励","expected_doc_ids":["d_recruit_v1","d_payroll"],"expected_answer_points":["内部推荐","每月 15"],"as_user":"u_member_1"}
+{"id":"q108","kind":"multi_hop","question":"VPN 与办公网络的使用","expected_doc_ids":["d_it_vpn","d_wifi_v1"],"expected_answer_points":["IT","EchoCorp"],"as_user":"u_member_1"}
+{"id":"q109","kind":"multi_hop","question":"会议室预订与着装要求","expected_doc_ids":["d_meeting","d_dress_code"],"expected_answer_points":["oa.example.com","正装"],"as_user":"u_member_1"}
+{"id":"q110","kind":"multi_hop","question":"申诉处理与档案管理","expected_doc_ids":["d_grievance_v1","d_archive_v1"],"expected_answer_points":["HR","5 年"],"as_user":"u_member_1"}
+{"id":"q111","kind":"exact_term","question":"NX-500 设备怎么买","expected_doc_ids":["d_purchase_nx500"],"expected_answer_points":["审批","PO-NX-2024-088"],"as_user":"u_member_1"}
+{"id":"q112","kind":"exact_term","question":"工号 OA-7711 属于哪个部门","expected_doc_ids":["d_employee_bob"],"expected_answer_points":["产品部"],"as_user":"u_member_1"}
+{"id":"q113","kind":"exact_term","question":"工号 OA-7712 在哪个部门","expected_doc_ids":["d_employee_bob"],"expected_answer_points":["运营部"],"as_user":"u_member_1"}
+{"id":"q114","kind":"exact_term","question":"SLA 99.95% 的服务清单","expected_doc_ids":["d_sla_v2"],"expected_answer_points":["核心服务","月报"],"as_user":"u_member_1"}
+{"id":"q115","kind":"exact_term","question":"KPI-2025Q1 文档 OKR 写法","expected_doc_ids":["d_kpi_2025q1"],"expected_answer_points":["Objective 2","自评"],"as_user":"u_member_1"}
+{"id":"q116","kind":"exact_term","question":"API token Y-88 怎么申请","expected_doc_ids":["d_token_y88"],"expected_answer_points":["加急","4h"],"as_user":"u_member_1"}
+{"id":"q117","kind":"exact_term","question":"DB-PROD-5 数据库备份策略","expected_doc_ids":["d_db_prod_5"],"expected_answer_points":["6 小时","90 天"],"as_user":"u_member_1"}
+{"id":"q118","kind":"exact_term","question":"项目代号 Eagle 立项","expected_doc_ids":["d_project_eagle"],"expected_answer_points":["Q2","移动端"],"as_user":"u_member_1"}
+{"id":"q119","kind":"exact_term","question":"合规编号 REG-2025-A01 报告","expected_doc_ids":["d_compliance_2025"],"expected_answer_points":["半年度","12 月"],"as_user":"u_member_1"}
+{"id":"q120","kind":"exact_term","question":"发票 INV-2025-001 抵扣期限","expected_doc_ids":["d_invoice_v2"],"expected_answer_points":["30 天","认证抵扣"],"as_user":"u_member_1"}
+{"id":"q121","kind":"exact_term","question":"租约 LEASE-2024-08 续签","expected_doc_ids":["d_lease_v1"],"expected_answer_points":["3 年","财务部"],"as_user":"u_member_1"}
+{"id":"q122","kind":"exact_term","question":"供应商 SUP-2024-11 评估","expected_doc_ids":["d_supplier_v1"],"expected_answer_points":["年度评估","准入清单"],"as_user":"u_member_1"}
+{"id":"q123","kind":"exact_term","question":"活动 EVT-2025-03 客户日","expected_doc_ids":["d_event_v1"],"expected_answer_points":["3 月 15 日","场地"],"as_user":"u_member_1"}
+{"id":"q124","kind":"exact_term","question":"专利 PAT-2024-X 年费缴纳","expected_doc_ids":["d_patent_v1"],"expected_answer_points":["6 月底","年费"],"as_user":"u_member_1"}
+{"id":"q125","kind":"exact_term","question":"办公室 3F 是哪个部门","expected_doc_ids":["d_office_3f"],"expected_answer_points":["研发部","80 个"],"as_user":"u_member_1"}
+{"id":"q126","kind":"exact_term","question":"会议室 B 容纳多少人","expected_doc_ids":["d_meeting_room_b"],"expected_answer_points":["12 人","1 小时"],"as_user":"u_member_1"}
+{"id":"q127","kind":"exact_term","question":"工位 SEAT-88 在哪","expected_doc_ids":["d_seat_88"],"expected_answer_points":["3F","OA-2024-88"],"as_user":"u_member_1"}
+{"id":"q128","kind":"exact_term","question":"凭证 V-2025-001 保管期","expected_doc_ids":["d_voucher_v1"],"expected_answer_points":["月末结转","10 年"],"as_user":"u_member_1"}
+{"id":"q129","kind":"exact_term","question":"工资发放的开户行","expected_doc_ids":["d_payroll_bank"],"expected_answer_points":["工商","102"],"as_user":"u_member_1"}
+{"id":"q130","kind":"exact_term","question":"商业保险 INS-2024 额度","expected_doc_ids":["d_insurance_v1"],"expected_answer_points":["50 万","续保"],"as_user":"u_member_1"}
+{"id":"q131","kind":"no_answer","question":"公司月球基地的班车安排","expected_doc_ids":[],"expected_answer_points":[],"as_user":"u_member_1"}
+{"id":"q132","kind":"no_answer","question":"元宇宙办公区 WiFi 密码","expected_doc_ids":[],"expected_answer_points":[],"as_user":"u_member_1"}
+{"id":"q133","kind":"no_answer","question":"公司潜水俱乐部报销政策","expected_doc_ids":[],"expected_answer_points":[],"as_user":"u_member_1"}
+{"id":"q134","kind":"no_answer","question":"员工赛博空间入职手续","expected_doc_ids":[],"expected_answer_points":[],"as_user":"u_member_1"}
+{"id":"q135","kind":"no_answer","question":"平行宇宙的差旅标准","expected_doc_ids":[],"expected_answer_points":[],"as_user":"u_member_1"}
+{"id":"q136","kind":"no_answer","question":"公司脑机接口设备领用","expected_doc_ids":[],"expected_answer_points":[],"as_user":"u_member_1"}
+{"id":"q137","kind":"no_answer","question":"时光机研发部门报销政策","expected_doc_ids":[],"expected_answer_points":[],"as_user":"u_member_1"}
+{"id":"q138","kind":"no_answer","question":"星际航线机票预订","expected_doc_ids":[],"expected_answer_points":[],"as_user":"u_member_1"}
+{"id":"q139","kind":"no_answer","question":"隐形斗篷工服管理","expected_doc_ids":[],"expected_answer_points":[],"as_user":"u_member_1"}
+{"id":"q140","kind":"no_answer","question":"AI 觉醒后员工安抚计划","expected_doc_ids":[],"expected_answer_points":[],"as_user":"u_member_1"}
+{"id":"q141","kind":"permission","question":"公司资产怎么编号","expected_doc_ids":["d_assets_v1"],"expected_answer_points":["AS-2024-001"],"as_user":"u_member_1","must_not_leak":["d_board_secret","d_fin_internal"]}
+{"id":"q142","kind":"permission","question":"招聘流程","expected_doc_ids":["d_recruit_v1"],"expected_answer_points":[],"as_user":"u_member_1","must_not_leak":["d_board_secret","d_fin_internal"]}
+{"id":"q143","kind":"permission","question":"加班上限","expected_doc_ids":["d_overtime_v2"],"expected_answer_points":["36 小时"],"as_user":"u_member_1","must_not_leak":["d_board_secret"]}
+{"id":"q144","kind":"permission","question":"员工申诉流程","expected_doc_ids":["d_grievance_v1"],"expected_answer_points":["HR"],"as_user":"u_member_1","must_not_leak":["d_fin_internal"]}
+{"id":"q145","kind":"permission","question":"公章管理","expected_doc_ids":["d_notary_v1"],"expected_answer_points":["行政部"],"as_user":"u_member_1","must_not_leak":["d_board_secret"]}
+{"id":"q146","kind":"permission","question":"团建预算","expected_doc_ids":["d_team_event"],"expected_answer_points":["300 元"],"as_user":"u_member_fin","must_not_leak":["d_board_secret"]}
+{"id":"q147","kind":"permission","question":"着装规范","expected_doc_ids":["d_dress_code"],"expected_answer_points":["商务休闲"],"as_user":"u_member_1","must_not_leak":["d_fin_internal"]}
+{"id":"q148","kind":"permission","question":"图书借阅","expected_doc_ids":["d_library"],"expected_answer_points":["2 本"],"as_user":"u_member_1","must_not_leak":["d_board_secret","d_fin_internal"]}
+{"id":"q149","kind":"permission","question":"考勤规则","expected_doc_ids":["d_attendance"],"expected_answer_points":["9:00-18:00"],"as_user":"u_member_1","must_not_leak":["d_fin_internal"]}
+{"id":"q150","kind":"permission","question":"访客登记","expected_doc_ids":["d_visitor_v1"],"expected_answer_points":["前台"],"as_user":"u_member_1","must_not_leak":["d_board_secret"]}

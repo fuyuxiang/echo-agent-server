@@ -12,9 +12,8 @@ import type { Parser, ParserUnit } from './types.js'
 let _client: VlmClient | null = null
 function client(): VlmClient {
   if (!_client) {
-    const url = process.env.ECHO_VLM_URL
-    const key = process.env.ECHO_VLM_KEY
-    _client = createVlmClient({ url, key })
+    // parser 处于模块加载期,此时 cfg 尚未注入;走 env 回退。
+    _client = createVlmClient()
   }
   return _client
 }

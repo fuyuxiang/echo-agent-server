@@ -107,3 +107,39 @@ export function testConfig(over: Partial<Config> = {}): Config {
     ...over
   }
 }
+
+/**
+ * 从 DB 的 model_configs 表覆盖 baseCfg 中的模型字段。
+ *
+ * 用途:支持模型配置热加载。管理员 PUT /api/v1/admin/model-config 后,
+ * 服务端无需重启即可用本函数读到最新 cfg,据此重建 embedder / reranker。
+ *
+ * 设计:
+ *   · DB 只覆盖"模型相关"字段(embedModel / embedDim / rerankModel);
+ *   · 基础设施字段(jwtSecret / masterKey / 路径 / 限流等)不在 DB 中,
+ *     一律走 baseCfg,避免运营误改 admin 密码或 storage 路径后服务
+ *     无感重启带来事故;
+ *   · 不存在 DB 行时直接返回 baseCfg(尚未配置)。
+ */
+export function loadConfigFromDb(
+  db: import('./db/index.js').DB,
+  baseCfg: Config
+): Config {
+  const row = db
+    .prepare(
+      `SELECT embed_model AS embedModel,
+              embed_dim   AS embedDim,
+              rerank_model AS rerankModel
+         FROM model_configs WHERE id = 'default'`
+    )
+    .get() as
+    | { embedModel: string; embedDim: number; rerankModel: string | null }
+    | undefined
+  if (!row) return baseCfg
+  return {
+    ...baseCfg,
+    embedModel: row.embedModel,
+    embedDim: row.embedDim,
+    rerankModel: row.rerankModel ?? baseCfg.rerankModel
+  }
+}

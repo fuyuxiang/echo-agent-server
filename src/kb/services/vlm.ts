@@ -4,22 +4,36 @@
  * 图片/图表/PPT 页的"看图说话"能力 —— 用多模态模型生成 200 字内中文描述,
  * 落 modality='caption' chunk,作为可检索的语义索引。
  *
- * 配置 ECHO_VLM_URL / ECHO_VLM_KEY 启用;否则返回占位 caption,
- * 标注"未配置",避免静默产出空索引。
+ * 走 cfg.vlmUrl + cfg.vlmKey 启用;缺位时返回占位 caption,标注"未配置",
+ * 避免静默产出空索引。
+ *
+ * cfg 可选:不传时回退到 env(兼容 parsers 在模块加载时调用);
+ * 注入路径(app.ts)必须传 cfg,让 Deps 与 health 暴露与真实配置一致。
  */
 
+import type { Config } from '../../config.js'
+
 export interface VlmClient {
+  /** 是否已配置远端服务。用于 health 端点与诊断。 */
+  readonly configured: boolean
   caption(buf: Buffer, mime: string): Promise<string>
 }
 
-export function createVlmClient(opts: { url?: string; key?: string }): VlmClient {
-  const { url, key } = opts
+export function createVlmClient(
+  cfg?: Config,
+  warn?: (m: string) => void
+): VlmClient {
+  const url = cfg?.vlmUrl ?? process.env.ECHO_VLM_URL
+  const key = cfg?.vlmKey ?? process.env.ECHO_VLM_KEY
   if (!url) {
+    warn?.('未配置 VLM 远端,图片 caption 将落到占位实现 —— 仅供开发/测试')
     return {
+      configured: false,
       caption: async (b) => `[VLM未配置:${b.length}B]`
     }
   }
   return {
+    configured: true,
     async caption(buf: Buffer, mime: string): Promise<string> {
       const form = new FormData()
       form.append('image', new Blob([new Uint8Array(buf)], { type: mime }), `image.${mime.split('/')[1] ?? 'png'}`)

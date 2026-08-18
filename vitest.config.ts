@@ -16,6 +16,7 @@ export default defineConfig({
     globals: false,
     // 后端测试是 Node 进程,不带 jsdom / happy-dom。
     environment: 'node',
+    include: ['test/**/*.test.ts', 'test/**/*.spec.ts', 'test/e2e/**/*.ts'],
     exclude: [
       '**/node_modules/**',
       '**/dist/**',

@@ -24,7 +24,9 @@ import { registerSyncRoutes } from './routes/sync.js'
 import { registerQualityRoutes } from './routes/quality.js'
 import { registerMcpRoutes } from './mcp.js'
 import { registerWeb } from './web.js'
-import type { Deps } from './types.js'
+import { createOcrClient } from './kb/services/ocr.js'
+import { createVlmClient } from './kb/services/vlm.js'
+import type { Deps, ThrottleLike } from './types.js'
 
 export interface BuildOptions {
   db: DB
@@ -50,26 +52,40 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
 
   const embedder = opts.overrides?.embedder ?? createEmbedder(cfg, warn)
   const reranker = opts.overrides?.reranker ?? createReranker(cfg, warn)
+  const ocrClient = opts.overrides?.ocrClient ?? createOcrClient(cfg, warn)
+  const vlmClient = opts.overrides?.vlmClient ?? createVlmClient(cfg, warn)
   const log = { warn }
 
+  // Deps 在此构建,retriever / throttle 后续再补。原因:Retriever 内部持有
+  // 同一份 deps 引用,PUT 替换 deps.embedder / deps.reranker 时,运行中的
+  // Retriever(this.deps === deps)会自动看到新实例 —— 这就是"模型配置
+  // 热加载不需要重建 Retriever"的核心机制。任何放在 Retriever 之外、不
+  // 经由 deps 暴露的内部引用,都不会随之更新,这就是为什么要让它们共享
+  // 同一个对象。
   const deps: Deps = {
     db,
     cfg,
     embedder,
     reranker,
     storage: opts.overrides?.storage ?? new FsStorage(cfg.storageDir),
-    retriever:
-      opts.overrides?.retriever ??
-      new Retriever({ db, cfg, embedder, reranker, log }),
-    // eval/CI 模式禁用登录限流:同一 IP+username 在 1 分钟内会跑过 5 次,
-    // 内存限流会把 fixture 创建流程锁死。生产保留默认行为。
-    throttle:
-      opts.overrides?.throttle ??
-      (process.env.ECHO_DISABLE_LOGIN_THROTTLE === '1'
-        ? { check: () => 0, recordFailure: () => undefined, recordSuccess: () => undefined }
-        : new LoginThrottle()),
-    ...opts.overrides
+    retriever: undefined as unknown as Retriever,
+    ocrClient,
+    vlmClient,
+    throttle: undefined as unknown as ThrottleLike
   }
+  deps.retriever =
+    opts.overrides?.retriever ?? new Retriever(deps)
+  // eval/CI 模式禁用登录限流:同一 IP+username 在 1 分钟内会跑过 5 次,
+  // 内存限流会把 fixture 创建流程锁死。生产保留默认行为。
+  deps.throttle =
+    opts.overrides?.throttle ??
+    (process.env.ECHO_DISABLE_LOGIN_THROTTLE === '1'
+      ? { check: () => 0, recordFailure: () => undefined, recordSuccess: () => undefined }
+      : new LoginThrottle())
+  // 保留 overrides 整体覆盖能力(测试注入)。放在最后,使其优先级最高;
+  // 但实际生产路径只通过 overrides 注入 retriever/throttle/storage,
+  // 上述已赋值的字段不受 opts.overrides 影响。
+  if (opts.overrides) Object.assign(deps, opts.overrides)
 
   app.decorate('deps', deps)
   app.decorate('audit', makeAudit(db, (e) => warn(`审计写入失败: ${String(e)}`)))
@@ -105,20 +121,32 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   app.register(multipart, { limits: { fileSize: cfg.maxUploadBytes, files: 1 } })
   app.decorate('authenticate', makeAuthenticate(db))
 
-  app.get('/api/v1/health', async () => ({
-    ok: true,
-    version: 1,
-    schemaVersion: db.pragma('user_version', { simple: true }),
+  app.get('/api/v1/health', async () => {
     // 暴露实际生效的模型能力。配置里写着 bge-m3 但跑的是占位实现时,
     // 从模型名看不出差别 —— 而两者的检索质量差一个量级。
-    models: {
-      embedder: deps.embedder.model,
-      semantic: deps.embedder.semantic,
-      reranker: deps.reranker.model,
-      crossEncoder: deps.reranker.crossEncoder,
-      productionReady: deps.embedder.semantic && deps.reranker.crossEncoder
+    const ocrConfigured = deps.ocrClient.configured
+    const vlmConfigured = deps.vlmClient.configured
+    const allReal =
+      deps.embedder.semantic &&
+      deps.reranker.crossEncoder &&
+      ocrConfigured &&
+      vlmConfigured
+    return {
+      ok: true,
+      version: 1,
+      schemaVersion: db.pragma('user_version', { simple: true }),
+      models: {
+        embedder: deps.embedder.model,
+        semantic: deps.embedder.semantic,
+        reranker: deps.reranker.model,
+        crossEncoder: deps.reranker.crossEncoder,
+        ocr: { configured: ocrConfigured },
+        vlm: { configured: vlmConfigured },
+        productionReady: allReal,
+        mode: allReal ? 'production' : 'placeholder'
+      }
     }
-  }))
+  })
 
   registerAuthRoutes(app)
   registerRetrieveRoutes(app)
@@ -132,12 +160,12 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   registerQualityRoutes(app)
   registerMcpRoutes(app, {
     db,
-    retriever:
-      opts.overrides?.retriever ??
-      new Retriever({ db, cfg, embedder, reranker, log }),
+    // 复用 deps.retriever,与 /api/v1/retrieve 共一份实例,共享 embedder/
+    // reranker 引用 —— PUT 替换 deps.embedder 时,MCP 工具链立刻看到。
+    retriever: deps.retriever,
     config: cfg,
-    embedder,
-    reranker
+    embedder: deps.embedder,
+    reranker: deps.reranker
   })
 
   // 静态资源放最后注册:它带 SPA 回退的 notFoundHandler,先注册会抢在
