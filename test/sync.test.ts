@@ -88,8 +88,10 @@ async function sync(
   docs: { docId: string; title: string; chunks: unknown[] }[]
   memories: unknown[]
   revokedDocs: string[]
+  revokedMemories: string[]
   nextCursor: number
   purgeAll: boolean
+  hasMore: boolean
 }> {
   const res = await app.inject({
     method: 'GET',
@@ -166,6 +168,36 @@ describe('增量同步', () => {
 
     const second = await sync(ctx.app, token, first.nextCursor)
     expect(second.docs.map((d) => d.title)).toContain('文档二')
+  })
+
+  it('达到分页上限时 cursor 只推进到本页边界,不会跳过后续文档', async () => {
+    const ctx = await setup()
+    const ids = [
+      await addDoc(ctx, ctx.orgScope, '文档一', '第一篇正文。'),
+      await addDoc(ctx, ctx.orgScope, '文档二', '第二篇正文。'),
+      await addDoc(ctx, ctx.orgScope, '文档三', '第三篇正文。')
+    ]
+    const base = Date.now() - 10_000
+    ids.forEach((id, i) => {
+      ctx.db.prepare('UPDATE documents SET updated_at = ? WHERE id = ?').run(base + i + 1, id)
+    })
+    const token = await login(ctx.app, 'alice', 'alice-password')
+    const firstRes = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/sync?cursor=0&deviceId=dev1&limit=2',
+      headers: bearer(token)
+    })
+    const first = firstRes.json().data
+    expect(first.docs).toHaveLength(2)
+    expect(first.hasMore).toBe(true)
+
+    const secondRes = await ctx.app.inject({
+      method: 'GET',
+      url: `/api/v1/sync?cursor=${first.nextCursor}&deviceId=dev1&limit=2`,
+      headers: bearer(token)
+    })
+    const second = secondRes.json().data
+    expect(second.docs.map((d: { docId: string }) => d.docId)).toContain(ids[2])
   })
 
   it('记录同步游标', async () => {
