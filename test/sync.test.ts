@@ -83,13 +83,13 @@ async function addDoc(
 async function sync(
   app: FastifyInstance,
   token: string,
-  cursor = 0
+  cursor: string | number = 0
 ): Promise<Record<string, never> & {
   docs: { docId: string; title: string; chunks: unknown[] }[]
   memories: unknown[]
   revokedDocs: string[]
   revokedMemories: string[]
-  nextCursor: number
+  nextCursor: string
   purgeAll: boolean
   hasMore: boolean
 }> {
@@ -208,9 +208,37 @@ describe('增量同步', () => {
 
     const row = ctx.db
       .prepare('SELECT user_id AS userId, cursor FROM sync_cursors WHERE device_id = ?')
-      .get('dev1') as { userId: string; cursor: number }
+      .get('dev1') as { userId: string; cursor: string }
     expect(row.userId).toBe(ctx.aliceId)
-    expect(row.cursor).toBeGreaterThan(0)
+    expect(row.cursor.length).toBeGreaterThan(10)
+  })
+
+  it('同一毫秒内超过分页上限的记录不会被 timestamp cursor 跳过', async () => {
+    const ctx = await setup()
+    const ids = [
+      await addDoc(ctx, ctx.orgScope, '同毫秒一', '第一篇正文。'),
+      await addDoc(ctx, ctx.orgScope, '同毫秒二', '第二篇正文。'),
+      await addDoc(ctx, ctx.orgScope, '同毫秒三', '第三篇正文。')
+    ]
+    const sameTime = Date.now() - 1000
+    for (const id of ids) {
+      ctx.db.prepare('UPDATE documents SET updated_at = ? WHERE id = ?').run(sameTime, id)
+    }
+    const token = await login(ctx.app, 'alice', 'alice-password')
+    const seen = new Set<string>()
+    let cursor: string | number = 0
+    for (let i = 0; i < 3; i++) {
+      const res = await ctx.app.inject({
+        method: 'GET',
+        url: `/api/v1/sync?cursor=${cursor}&deviceId=dev1&limit=1`,
+        headers: bearer(token)
+      })
+      const page = res.json().data
+      for (const doc of page.docs) seen.add(doc.docId)
+      cursor = page.nextCursor
+      if (!page.hasMore) break
+    }
+    expect([...seen].sort()).toEqual([...ids].sort())
   })
 })
 

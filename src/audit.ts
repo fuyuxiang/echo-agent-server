@@ -28,8 +28,10 @@ export type AuditAction =
 /**
  * 审计写入。
  *
- * 异步写且不阻塞主链路:audit 失败绝不阻塞业务请求,但也不允许静默
- * 丢失 —— 失败时进 stderr 与内存失败计数,让运维可观测。
+ * SQLite 是进程内嵌数据库，单次 INSERT 很短。这里选择同步、fail-open 写入：
+ * 请求不会因为审计失败而失败，同时也不存在 setImmediate 排队后数据库已经
+ * close 的退出竞态。需要更高吞吐时应换成有 drain() 生命周期的独立 AuditSink，
+ * 不能重新引入无人等待的后台任务。
  *
  * 不记录检索到的具体内容,只记 who/when/what,避免审计表本身变成一份
  * 绕过权限的知识副本。
@@ -59,9 +61,6 @@ export function makeAudit(db: DB, onError?: (e: unknown) => void) {
     )
   }
 
-  // 队列 + setImmediate 异步落库:主链路返回前不会等 SQLite。
-  // 失败:log 写到 stderr 并计数;队列继续滚动,绝不阻塞业务。
-  let pending = 0
   const failures = { count: 0 }
 
   function audit(
@@ -70,18 +69,14 @@ export function makeAudit(db: DB, onError?: (e: unknown) => void) {
     target?: string,
     detail?: Record<string, unknown>
   ): void {
-    pending += 1
-    setImmediate(() => {
-      pending -= 1
-      try {
-        write(req, action, target, detail)
-      } catch (e) {
-        failures.count += 1
-        onError?.(e)
-        // eslint-disable-next-line no-console
-        console.error(`[audit] 写入失败 (累计 ${failures.count}):`, e)
-      }
-    })
+    try {
+      write(req, action, target, detail)
+    } catch (e) {
+      failures.count += 1
+      onError?.(e)
+      // eslint-disable-next-line no-console
+      console.error(`[audit] 写入失败 (累计 ${failures.count}):`, e)
+    }
   }
 
   /** 仅在测试中同步写一次,避免测试结束前还没落库。 */

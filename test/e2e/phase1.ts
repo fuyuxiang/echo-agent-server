@@ -266,10 +266,22 @@ describe('phase1 业务闭环', () => {
     expect(data.chunks.length).toBeGreaterThan(0)
     const sync2 = await app.inject({
       method: 'GET',
-      url: '/api/v1/sync?deviceId=dev-sync&limit=50',
+      url: `/api/v1/sync?cursor=${encodeURIComponent(lastCursor)}&deviceId=dev-sync&limit=50`,
       headers: { authorization: `Bearer ${accessToken}` }
     })
     expect(sync2.statusCode).toBe(200)
-    expect(sync2.json().data.nextCursor).toBeGreaterThanOrEqual(lastCursor)
+    // V2 cursor 是不可排序的复合游标；服务端在翻页完成后允许把详细
+    // keyset 压缩成新快照，所以这里只验证它能继续完成增量协议。
+    const nextCursor = sync2.json().data.nextCursor
+    expect(typeof nextCursor).toBe('string')
+    expect(nextCursor.length).toBeGreaterThan(0)
+    const sync3 = await app.inject({
+      method: 'GET',
+      url: `/api/v1/sync?cursor=${encodeURIComponent(nextCursor)}&deviceId=dev-sync&limit=50`,
+      headers: { authorization: `Bearer ${accessToken}` }
+    })
+    expect(sync3.statusCode).toBe(200)
+    expect(sync3.json().data.docs).toHaveLength(0)
+    expect(sync3.json().data.memories).toHaveLength(0)
   })
 })
