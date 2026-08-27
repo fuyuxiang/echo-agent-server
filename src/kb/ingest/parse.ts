@@ -6,7 +6,8 @@ import { docxParser } from '../parsers/docx.js'
 import { pptxParser } from '../parsers/pptx.js'
 import { xlsxParser } from '../parsers/xlsx.js'
 import { imageParser, imageCaptionParser } from '../parsers/image.js'
-import { pdfParser } from '../parsers/pdf.js'
+// pdfParser 依赖 pdf-parse/pdfjs-dist（要求 Node 18+）。改为按需加载，
+// 避免在 Node 16 之类的旧版本上启动时直接崩溃。
 import { audioParser, videoParser, mediaParserFor } from '../parsers/media.js'
 import type { ParserUnit } from '../parsers/types.js'
 
@@ -160,6 +161,7 @@ export async function parseDocument(
       return { blocks: units.map(unitToBlock), pageCount: null }
     }
     case 'pdf': {
+      const { pdfParser } = await import('../parsers/pdf.js')
       const units = await pdfParser.parse(buf, { docId, fileName })
       const pages = new Set(
         units

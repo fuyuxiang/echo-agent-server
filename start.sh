@@ -34,6 +34,22 @@ is_server_process() {
     [[ "$command_line" == *"node --env-file=.env dist/server.js"* ]]
 }
 
+# 把 .env 注入当前 shell，供随后启动的 node 进程使用；兼容 Node 16（不支持 --env-file）。
+# set -a 会让后续 source/sourced 的赋值自动 export。
+load_dotenv() {
+  # 去除行尾空白与回车，跳过空行与 # 注释
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    # 仅处理 KEY=VALUE 形式；已有引号的也保留
+    if [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      export "$key=$value"
+    fi
+  done < .env
+}
+
 # 已在运行则不重复启动
 if [ -f "$PID_FILE" ]; then
   PID="$(read_pid_file)"
@@ -63,17 +79,15 @@ if [ ! -f dist/server.js ]; then
   npm run build
 fi
 
-# 使用与服务启动完全相同的 Node .env 解析规则，兼容引号、空格与系统环境变量覆盖。
-read_env() {
-  node --env-file=.env -e \
-    'const [key, fallback] = process.argv.slice(1); process.stdout.write(process.env[key] || fallback)' \
-    "$1" "$2"
-}
-
-PORT="$(read_env ECHO_PORT 8787)"
-HOST="$(read_env ECHO_HOST 0.0.0.0)"
-ADMIN_USER="$(read_env ECHO_ADMIN_USER admin)"
-DB_PATH="$(read_env ECHO_DB_PATH ./data/echo.db)"
+# 把 .env 注入当前 shell。兼容 Node 16（无 --env-file）与未来高版本；
+# bash 直接 source 也可以，但这里手工解析能跳过注释行并保留已有 shell 变量优先级。
+load_dotenv
+# shellcheck disable=SC2154
+# shellcheck disable=SC2034
+PORT="${ECHO_PORT:-8787}"
+HOST="${ECHO_HOST:-0.0.0.0}"
+ADMIN_USER="${ECHO_ADMIN_USER:-admin}"
+DB_PATH="${ECHO_DB_PATH:-./data/echo.db}"
 
 # 监听所有网卡时使用回环地址做本机访问和就绪探测；IPv6 地址需要方括号。
 case "$HOST" in
@@ -95,10 +109,26 @@ else
 fi
 
 echo "[echo-server] 启动中..."
-# 用 Node 原生 --env-file 加载 .env，后台运行，日志重定向到文件
-nohup node --env-file=.env "$SERVER_ENTRY" >> "$LOG_FILE" 2>&1 &
+# 环境变量已通过 load_dotenv 注入当前 shell；后台运行，日志重定向到文件。
+nohup node "$SERVER_ENTRY" >> "$LOG_FILE" 2>&1 &
 PID=$!
 printf '%s\n' "$PID" > "$PID_FILE"
+
+# 写一个临时探测脚本：兼容 Node 16（无全局 fetch），用 http/https 模块探测 /api/v1/health。
+HEALTH_PROBE="$(mktemp -t echo-health.XXXXXX.js)"
+cat > "$HEALTH_PROBE" <<'PROBE_EOF'
+// process.argv: [0]=node, [1]=脚本路径, [2]=要探测的 URL
+const url = new URL(process.argv[2]);
+const lib = url.protocol === 'https:' ? require('https') : require('http');
+const req = lib.request(url, { method: 'GET', timeout: 1000 }, (res) => {
+  // 启动期的健康检查只要端口上有人在应答 HTTP 即可；4xx 也算就绪。
+  process.exit(res.statusCode >= 200 && res.statusCode < 500 ? 0 : 1);
+});
+req.on('error', () => process.exit(1));
+req.on('timeout', () => { req.destroy(new Error('timeout')); process.exit(1); });
+req.end();
+PROBE_EOF
+trap 'rm -f "$HEALTH_PROBE"' EXIT
 
 # 最多等待 30 秒，以公开健康接口成功响应作为启动完成标准。
 READY=false
@@ -106,9 +136,7 @@ for ((attempt = 1; attempt <= 30; attempt++)); do
   if ! is_server_process "$PID"; then
     break
   fi
-  if node -e \
-    'fetch(process.argv[1], { signal: AbortSignal.timeout(1000) }).then((res) => process.exit(res.ok ? 0 : 1)).catch(() => process.exit(1))' \
-    "$HEALTH_URL"; then
+  if node "$HEALTH_PROBE" "$HEALTH_URL"; then
     # 防止端口上已有其他健康服务：等待本次子进程稳定后再确认成功。
     sleep 1
     if is_server_process "$PID"; then

@@ -21,7 +21,7 @@ fi
 echo "[echo-server] 构建中 (npm run build)..."
 npm run build
 echo "[echo-server] 校验配置..."
-node --env-file=.env -e \
+node -e \
   'import("./dist/config.js").then(({ loadConfig }) => loadConfig()).catch((error) => { console.error("[echo-server] " + error.message); process.exit(1) })'
 
 ./stop.sh
