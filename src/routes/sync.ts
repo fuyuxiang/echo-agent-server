@@ -137,9 +137,12 @@ export function registerSyncRoutes(app: FastifyInstance): void {
                    WHERE qc.doc_id = d.id
                 ), 0) AS lastCitedAt
            FROM documents d
-           JOIN scopes s ON s.id = d.scope_id
+           LEFT JOIN document_families df ON df.id = d.family_id
+           JOIN v_effective_scopes s ON s.id = d.scope_id
           WHERE d.scope_id IN (${placeholders})
             AND d.sensitivity <= ? AND d.status = 'ready'
+            AND (d.family_id IS NULL OR
+                 (df.current_document_id = d.id AND df.state = 'active'))
        )
        SELECT *, MAX(updatedAt, lastCitedAt) AS syncAt
          FROM candidates
@@ -174,7 +177,7 @@ export function registerSyncRoutes(app: FastifyInstance): void {
     const memoryRows = db.prepare(
       `SELECT m.id, m.kind, m.content, m.confidence, m.updated_at AS updatedAt,
               m.updated_at AS syncAt, s.kind AS scopeKind
-         FROM org_memories m JOIN scopes s ON s.id = m.scope_id
+         FROM org_memories m JOIN v_effective_scopes s ON s.id = m.scope_id
         WHERE m.scope_id IN (${placeholders}) AND m.status = 'active'
           AND (m.updated_at > ? OR (m.updated_at = ? AND m.id > ?))
           AND m.updated_at <= ?

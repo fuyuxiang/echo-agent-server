@@ -1,0 +1,81 @@
+services:
+  echo-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: echo-agent-server:local
+    restart: unless-stopped
+    env_file:
+      - path: .env.production
+        required: false
+    environment:
+      ECHO_HOST: 0.0.0.0
+      ECHO_PORT: 8787
+      ECHO_DB_PATH: /app/data/echo.db
+      ECHO_STORAGE_DIR: /app/data/storage
+      ECHO_MODEL_DIR: /app/data/models
+      ECHO_JWT_SECRET_FILE: /run/secrets/echo_jwt_secret
+      ECHO_MASTER_KEY_FILE: /run/secrets/echo_master_key
+      ECHO_ADMIN_PASSWORD_FILE: /run/secrets/echo_admin_password
+    secrets:
+      - echo_jwt_secret
+      - echo_master_key
+      - echo_admin_password
+    volumes:
+      - echo_data:/app/data
+      - ./backups:/app/backups
+    expose:
+      - "8787"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      start_period: 30s
+      retries: 4
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    networks:
+      - echo_internal
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      echo-server:
+        condition: service_healthy
+    environment:
+      ECHO_PUBLIC_DOMAIN: ${ECHO_PUBLIC_DOMAIN:?set ECHO_PUBLIC_DOMAIN in .env.production}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - echo_internal
+
+secrets:
+  echo_jwt_secret:
+    file: ./deploy/secrets/echo_jwt_secret
+  echo_master_key:
+    file: ./deploy/secrets/echo_master_key
+  echo_admin_password:
+    file: ./deploy/secrets/echo_admin_password
+
+volumes:
+  echo_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  echo_internal:
+    driver: bridge

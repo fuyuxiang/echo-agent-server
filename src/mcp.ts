@@ -171,9 +171,14 @@ function buildServer(deps: McpDeps, userId: string): McpServer {
             text: JSON.stringify({
               chunks: res.chunks.map((c) => ({
                 id: c.chunkId,
+                chunkId: c.chunkId,
+                docId: c.docId,
                 doc: c.docTitle,
+                title: c.docTitle,
                 page: c.citation.page,
                 heading: c.citation.heading,
+                citation: c.citation,
+                openUrl: c.citation.openUrl,
                 text: c.text,
                 score: c.score,
                 stale: c.stale
@@ -208,19 +213,6 @@ function buildServer(deps: McpDeps, userId: string): McpServer {
         | undefined
       if (!row) {
         return { isError: true, content: [{ type: 'text' as const, text: '文档不存在' }] }
-      }
-
-      // 文本类(md/txt)直接从 chunks 拼接;PDF/DOCX 还需要文件级提取,
-      // MCP 端不实现,告知客户端去用原始文件
-      if (row.source_type === 'pdf' || row.source_type === 'docx') {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: `${row.title}\n\n(此为二进制文档,MCP 端请通过 /api/v1/docs/${doc_id}/raw 获取)`
-            }
-          ]
-        }
       }
 
       const sql = page
@@ -278,8 +270,11 @@ function buildServer(deps: McpDeps, userId: string): McpServer {
                   (SELECT COUNT(*) FROM chunks c WHERE c.doc_id = d.id) AS chunkCount,
                   s.kind AS scopeKind, s.name AS scopeName
              FROM documents d
-             JOIN scopes s ON s.id = d.scope_id
+             LEFT JOIN document_families df ON df.id = d.family_id
+             JOIN v_effective_scopes s ON s.id = d.scope_id
             WHERE ${where.join(' AND ')}
+              AND (d.family_id IS NULL OR
+                   (df.current_document_id = d.id AND df.state = 'active'))
             ORDER BY d.updated_at DESC LIMIT ?`
         )
         .all(...params, limit) as Record<string, unknown>[]

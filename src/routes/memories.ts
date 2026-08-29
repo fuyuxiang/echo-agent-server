@@ -39,7 +39,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
                 s.kind AS scopeKind, s.name AS scopeName, s.id AS scopeId,
                 u.display_name AS authorName
            FROM org_memories m
-           JOIN scopes s ON s.id = m.scope_id
+           JOIN v_effective_scopes s ON s.id = m.scope_id
            LEFT JOIN users u ON u.id = m.author_id
           WHERE ${where.join(' AND ')}
           ORDER BY m.hit_count DESC, m.updated_at DESC
@@ -140,9 +140,10 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       const params: unknown[] = []
       if (claims.role !== 'admin') {
         if (ctx.scopeIds.length === 0) return reply.send(ok([]))
+        // 两侧都可见才允许读取冲突详情；只看见一侧时返回另一侧正文会泄密。
         where =
           `WHERE a.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})` +
-          ` OR b.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})`
+          ` AND b.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})`
         params.push(...ctx.scopeIds, ...ctx.scopeIds)
       }
 
@@ -217,14 +218,15 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       if (!c) return reply.code(404).send(fail(4041, '矛盾不存在'))
       if (c.resolution) return reply.code(409).send(fail(4094, '该矛盾已处理'))
 
-      // curator 必须对 a/b 至少一方所在 scope 可见,否则禁止决议。
+      // curator 必须同时管理 a/b 两侧；决议会退休或合并两条记忆，只有一侧
+      // 权限时允许操作会造成跨团队数据破坏。
       const bScope = db
         .prepare('SELECT scope_id AS scopeId FROM org_memories WHERE id = ?')
         .get(c.bId) as { scopeId: string } | undefined
       if (
         claims.role !== 'admin' &&
-        !canAccessScope(ctx, c.aScopeId) &&
-        !(bScope && canAccessScope(ctx, bScope.scopeId))
+        (!canAccessScope(ctx, c.aScopeId) ||
+          !(bScope && canAccessScope(ctx, bScope.scopeId)))
       ) {
         return reply.code(403).send(fail(4037, '无权处理该矛盾'))
       }

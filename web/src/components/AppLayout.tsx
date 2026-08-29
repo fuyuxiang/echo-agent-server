@@ -30,7 +30,12 @@ export default function AppLayout() {
   useEffect(() => {
     const tick = async (): Promise<void> => {
       try {
-        setPendingCount((await api.listPromotions('pending')).length)
+        const [promotions, documents, skills] = await Promise.all([
+          api.listPromotions('pending'),
+          api.listDocumentSubmissions('pending'),
+          api.listSkillSubmissions('pending'),
+        ])
+        setPendingCount(promotions.length + documents.length + skills.length)
       } catch {
         // 静默失败:菜单角标不值得打断使用
       }
@@ -45,7 +50,7 @@ export default function AppLayout() {
     {
       key: '/review',
       icon: <AuditOutlined />,
-      label: pendingCount > 0 ? <Badge count={pendingCount} offset={[10, 0]}>知识审核</Badge> : '知识审核',
+      label: pendingCount > 0 ? <Badge count={pendingCount} offset={[10, 0]}>发布审核</Badge> : '发布审核',
     },
     { key: '/memories', icon: <BulbOutlined />, label: '组织记忆' },
     { key: '/search', icon: <SearchOutlined />, label: '检索自测' },

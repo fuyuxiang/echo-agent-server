@@ -13,15 +13,17 @@ const RetrieveSchema = z.object({
   token_budget: z.coerce.number().int().min(500).max(32000).optional(),
   tokenBudget: z.coerce.number().int().min(500).max(32000).optional(),
   /** 显式限定 scope 类别:'org' = 全公司,'team' = 当前用户可见的团队层。undefined = 全部。 */
-  scopes: z.array(z.enum(['org', 'team'])).optional(),
+  scopes: z.array(z.enum(['personal', 'org', 'team'])).optional(),
+  scope_ids: z.array(z.string()).max(100).optional(),
+  scopeIds: z.array(z.string()).max(100).optional(),
   filters: z
     .object({
       tags: z.array(z.string()).optional(),
       // source_types / sourceTypes 双名
       source_types: z.array(z.string()).optional(),
       sourceTypes: z.array(z.string()).optional(),
-      scope_kinds: z.array(z.enum(['org', 'team'])).optional(),
-      scopeKinds: z.array(z.enum(['org', 'team'])).optional()
+      scope_kinds: z.array(z.enum(['personal', 'org', 'team'])).optional(),
+      scopeKinds: z.array(z.enum(['personal', 'org', 'team'])).optional()
     })
     .optional()
 })
@@ -76,6 +78,7 @@ export function registerRetrieveRoutes(app: FastifyInstance): void {
       multiHop: body.multi_hop ?? body.multiHop,
       tokenBudget: body.token_budget ?? body.tokenBudget,
       scopes: body.scopes,
+      scopeIds: body.scope_ids ?? body.scopeIds,
       filters: body.filters
         ? {
             tags: body.filters.tags,

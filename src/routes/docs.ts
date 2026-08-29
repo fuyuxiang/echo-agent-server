@@ -7,6 +7,7 @@ import { loadAccessContext, canAccessScope, canAccessDocument } from '../auth/sc
 import { enqueueIngest } from '../kb/ingest/worker.js'
 import { deleteChunks } from '../kb/ingest/indexer.js'
 import { sourceTypeFromName, SUPPORTED_EXTENSIONS } from '../kb/ingest/parse.js'
+import { archiveFamilyIfCurrent, createDocumentFamily } from '../dao/documents.js'
 
 const ListQuery = z.object({
   scopeId: z.string().optional(),
@@ -87,32 +88,37 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       const now = Date.now()
       const title = fields.title?.value?.trim() || fileName
 
-      db.prepare(
-        `INSERT INTO documents (id, scope_id, title, source_type, storage_key, content_hash,
-                                byte_size, owner_id, sensitivity, volatility, status,
-                                created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?)`
-      ).run(
-        docId,
-        scopeId,
-        title,
-        sourceType,
-        storageKey,
-        hash,
-        buf.length,
-        fields.ownerId?.value ?? claims.sub,
-        Number(fields.sensitivity?.value ?? 0),
-        fields.volatility?.value === 'volatile' ? 'volatile' : 'stable',
-        now,
-        now
-      )
+      const ownerId = fields.ownerId?.value ?? claims.sub
+      db.transaction(() => {
+        const familyId = createDocumentFamily(db, { scopeId, title, ownerId, now })
+        db.prepare(
+          `INSERT INTO documents (id, scope_id, title, source_type, storage_key, content_hash,
+                                  byte_size, owner_id, sensitivity, volatility, status,
+                                  family_id, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)`
+        ).run(
+          docId,
+          scopeId,
+          title,
+          sourceType,
+          storageKey,
+          hash,
+          buf.length,
+          ownerId,
+          Number(fields.sensitivity?.value ?? 0),
+          fields.volatility?.value === 'volatile' ? 'volatile' : 'stable',
+          familyId,
+          now,
+          now
+        )
 
-      const tags = fields.tags?.value
-      if (tags) {
-        for (const tag of tags.split(',').map((t) => t.trim()).filter(Boolean)) {
-          db.prepare('INSERT OR IGNORE INTO doc_tags (doc_id, tag) VALUES (?,?)').run(docId, tag)
+        const tags = fields.tags?.value
+        if (tags) {
+          for (const tag of tags.split(',').map((t) => t.trim()).filter(Boolean)) {
+            db.prepare('INSERT OR IGNORE INTO doc_tags (doc_id, tag) VALUES (?,?)').run(docId, tag)
+          }
         }
-      }
+      })()
 
       enqueueIngest(db, docId)
       app.audit(req, 'upload', docId, { title, scopeId, bytes: buf.length })
@@ -132,7 +138,9 @@ export function registerDocsRoutes(app: FastifyInstance): void {
     // 列表同样受 scope 与密级限制 —— 否则可以从标题里推断出机密文档的存在。
     const where: string[] = [
       `d.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})`,
-      'd.sensitivity <= ?'
+      'd.sensitivity <= ?',
+      "f.state = 'active'",
+      "(d.status != 'ready' OR f.current_document_id = d.id)"
     ]
     const params: unknown[] = [...ctx.scopeIds, ctx.clearance]
 
@@ -160,7 +168,12 @@ export function registerDocsRoutes(app: FastifyInstance): void {
     const whereSql = where.join(' AND ')
     const total = (
       db
-        .prepare(`SELECT COUNT(*) AS n FROM documents d WHERE ${whereSql}`)
+        .prepare(
+          `SELECT COUNT(*) AS n
+             FROM documents d
+             JOIN document_families f ON f.id = d.family_id
+            WHERE ${whereSql}`
+        )
         .get(...params) as { n: number }
     ).n
 
@@ -169,11 +182,14 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         `SELECT d.id, d.title, d.source_type AS sourceType, d.status, d.fail_reason AS failReason,
                 d.byte_size AS byteSize, d.sensitivity, d.volatility, d.version,
                 d.created_at AS createdAt, d.updated_at AS updatedAt, d.indexed_at AS indexedAt,
+                d.fts_status AS ftsStatus, d.vector_status AS vectorStatus,
+                d.index_model_version AS indexModelVersion,
                 s.kind AS scopeKind, s.name AS scopeName, s.id AS scopeId,
                 u.display_name AS ownerName,
                 (SELECT COUNT(*) FROM chunks c WHERE c.doc_id = d.id) AS chunkCount
            FROM documents d
-           JOIN scopes s ON s.id = d.scope_id
+           JOIN document_families f ON f.id = d.family_id
+           JOIN v_effective_scopes s ON s.id = d.scope_id
            LEFT JOIN users u ON u.id = d.owner_id
           WHERE ${whereSql}
           ORDER BY d.updated_at DESC
@@ -217,7 +233,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       .prepare(
         `SELECT d.*, s.kind AS scopeKind, s.name AS scopeName, u.display_name AS ownerName
            FROM documents d
-           JOIN scopes s ON s.id = d.scope_id
+           JOIN v_effective_scopes s ON s.id = d.scope_id
            LEFT JOIN users u ON u.id = d.owner_id
           WHERE d.id = ?`
       )
@@ -287,9 +303,8 @@ export function registerDocsRoutes(app: FastifyInstance): void {
    *   GET /api/v1/docs/:id/content?page=N&range=seqStart:seqEnd&format=raw
    *
    * 与 /raw 的区别:/raw 永远返回完整原始文件(用于下载),/content 优先返回
-   * 已分块文本(用于引用点击后的段落定位)。对 PDF/DOCX 等二进制类型,/content
-   * 给出"请通过 /raw 获取"的提示并附 raw URL —— 服务端不做 PDF 解析,
-   * 引用定位交给桌面端 PDF/媒体查看器。
+   * 已分块文本(用于引用点击后的段落定位)。PDF/DOCX 等文件已经在摄取阶段
+   * 解析成 chunk，因此同样返回文本；原始文件始终由 /raw 单独下载。
    */
   app.get(
     '/api/v1/docs/:id/content',
@@ -312,11 +327,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         .get(id) as { sourceType: string; storageKey: string | null; title: string } | undefined
       if (!doc) return reply.code(404).send(fail(4041, '文档不存在'))
 
-      const isBinary = ['pdf', 'docx', 'pptx', 'xlsx', 'image', 'audio', 'video'].includes(
-        doc.sourceType
-      )
-
-      if (wantRaw || isBinary) {
+      if (wantRaw) {
         return reply.send(
           ok({
             docId: id,
@@ -324,15 +335,12 @@ export function registerDocsRoutes(app: FastifyInstance): void {
             sourceType: doc.sourceType,
             text: null,
             chunks: [],
-            rawUrl: doc.storageKey ? `/api/v1/docs/${id}/raw` : null,
-            note: isBinary
-              ? '二进制文档;请通过 /api/v1/docs/:id/raw 获取原始文件'
-              : undefined
+            rawUrl: doc.storageKey ? `/api/v1/docs/${id}/raw` : null
           })
         )
       }
 
-      // 文本类:按 page / seq 切片返回 chunks。优先 page,否则按 range。
+      // 所有已摄取类型都按 page / seq 返回解析后的 chunks。
       const params: unknown[] = [id]
       let where = 'doc_id = ?'
       if (q.page) {
@@ -407,19 +415,6 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         | { sourceType: string; title: string }
         | undefined
       if (!doc) return reply.code(404).send(fail(4041, '文档不存在'))
-
-      const isBinary = ['pdf', 'docx', 'pptx', 'xlsx', 'image', 'audio', 'video'].includes(
-        doc.sourceType
-      )
-      if (isBinary) {
-        return reply.send(
-          ok({
-            docId: parsed.data.docId,
-            text: '',
-            note: '二进制文档;请通过 /api/v1/docs/:id/raw 获取原始文件'
-          })
-        )
-      }
 
       const params: unknown[] = [parsed.data.docId]
       let where = 'doc_id = ?'
@@ -521,6 +516,23 @@ export function registerDocsRoutes(app: FastifyInstance): void {
              WHERE doc_id = ?`
           ).run(id, id, id)
         }
+        if (v.title !== undefined || v.scopeId !== undefined || v.ownerId !== undefined) {
+          db.prepare(
+            `UPDATE document_families SET
+               canonical_title = COALESCE(?, canonical_title),
+               scope_id = COALESCE(?, scope_id),
+               owner_id = CASE WHEN ? THEN ? ELSE owner_id END,
+               updated_at = ?
+             WHERE id = (SELECT family_id FROM documents WHERE id = ?)`
+          ).run(
+            v.title ?? null,
+            v.scopeId ?? null,
+            v.ownerId !== undefined ? 1 : 0,
+            v.ownerId ?? null,
+            Date.now(),
+            id
+          )
+        }
         if (v.tags) {
           db.prepare('DELETE FROM doc_tags WHERE doc_id = ?').run(id)
           for (const tag of v.tags) {
@@ -581,7 +593,8 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       const old = db
         .prepare(
           `SELECT scope_id AS scopeId, sensitivity, sensitivity AS sens,
-                  owner_id AS ownerId, version, source_type AS sourceType, title
+                  owner_id AS ownerId, version, source_type AS sourceType, title,
+                  family_id AS familyId
              FROM documents WHERE id = ?`
         )
         .get(oldId) as
@@ -592,6 +605,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
             version: number
             sourceType: string
             title: string
+            familyId: string | null
           }
         | undefined
       if (!old) return reply.code(404).send(fail(4041, '原文档不存在'))
@@ -621,11 +635,24 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         (data.fields as Record<string, { value?: string } | undefined>).title?.value?.trim() ||
         `${old.title} (v${old.version + 1})`
 
+      const familyId = old.familyId ?? createDocumentFamily(db, {
+        scopeId: old.scopeId,
+        title: old.title,
+        ownerId: old.ownerId,
+        now
+      })
+      if (!old.familyId) {
+        db.prepare('UPDATE documents SET family_id = ? WHERE id = ?').run(familyId, oldId)
+        db.prepare(
+          `UPDATE document_families SET current_document_id = ? WHERE id = ?`
+        ).run(oldId, familyId)
+      }
+
       db.prepare(
         `INSERT INTO documents (id, scope_id, title, source_type, storage_key, content_hash,
                                 byte_size, owner_id, sensitivity, volatility, status,
-                                supersedes_id, version, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)`
+                                supersedes_id, version, family_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)`
       ).run(
         newDocId,
         old.scopeId,
@@ -639,6 +666,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         'stable',
         oldId,
         old.version + 1,
+        familyId,
         now,
         now
       )
@@ -679,10 +707,12 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       }
 
       db.transaction(() => {
+        const now = Date.now()
         deleteChunks(db, id)
         db.prepare(
           "UPDATE documents SET status = 'archived', updated_at = ? WHERE id = ?"
-        ).run(Date.now(), id)
+        ).run(now, id)
+        archiveFamilyIfCurrent(db, id, now)
         db.prepare("DELETE FROM ingest_jobs WHERE doc_id = ? AND state != 'done'").run(id)
       })()
 

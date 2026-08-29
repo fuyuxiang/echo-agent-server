@@ -48,7 +48,7 @@ export default function Documents() {
     } finally {
       setLoading(false)
     }
-  }, [page, scopeFilter, keyword])
+  }, [page, scopeFilter, keyword, tagFilter])
 
   useEffect(() => { void load() }, [load])
   useEffect(() => { void api.listScopes().then(setScopes) }, [])
@@ -84,7 +84,11 @@ export default function Documents() {
                 // 标签本身不敏感,但它们会让"看见存在"成为间接泄露
                 // (如"董事会"标签出现就知道有相关文档) —— 与标题同权限,
                 // 列表的 scope 过滤已经守住。
-                <Tag key={t}>{t}</Tag>
+                <Tag
+                  key={t}
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => { setTagFilter(t); setPage(1) }}
+                >{t}</Tag>
               ))}
             </Space>
           )}
@@ -195,6 +199,11 @@ export default function Documents() {
           style={{ width: 220 }}
           onSearch={(v) => { setKeyword(v); setPage(1) }}
         />
+        {tagFilter && (
+          <Tag closable onClose={() => { setTagFilter(''); setPage(1) }}>
+            标签：{tagFilter}
+          </Tag>
+        )}
       </Space>
 
       <Table

@@ -7,6 +7,9 @@ import type { SourceType } from '../types.js'
 import { parseDocument } from './parse.js'
 import { chunkBlocks } from './chunk.js'
 import { indexChunks, validateIngest } from './indexer.js'
+import { activateDocumentVersion } from '../../dao/documents.js'
+import type { OcrClient } from '../services/ocr.js'
+import type { VlmClient } from '../services/vlm.js'
 
 // 租约时长。worker 崩溃或进程重启后,超过这个时间的 running 任务会被重新
 // 领取 —— 没有这个机制,文档会永久卡在 parsing 状态,而且没有任何报错。
@@ -35,9 +38,12 @@ export function enqueueIngest(db: DB, docId: string): string {
       `INSERT INTO ingest_jobs (id, doc_id, stage, state, attempts, created_at, updated_at)
        VALUES (?,?,'parse','queued',0,?,?)`
     ).run(id, docId, now, now)
-    db.prepare("UPDATE documents SET status = 'pending', fail_reason = NULL WHERE id = ?").run(
-      docId
-    )
+    db.prepare(
+      `UPDATE documents
+          SET status = 'pending', fail_reason = NULL,
+              fts_status = 'pending', vector_status = 'pending'
+        WHERE id = ?`
+    ).run(docId)
   })()
   return id
 }
@@ -103,13 +109,33 @@ function failJob(db: DB, job: JobRow, error: string): void {
       "UPDATE ingest_jobs SET state = 'failed', last_error = ?, updated_at = ? WHERE id = ?"
     ).run(error.slice(0, 500), Date.now(), job.id)
     setDocStatus(db, job.docId, 'failed', error.slice(0, 500))
+    db.prepare(
+      `UPDATE documents SET
+         fts_status = CASE WHEN EXISTS (
+           SELECT 1 FROM chunks c WHERE c.doc_id = documents.id
+         ) THEN fts_status ELSE 'failed' END,
+         vector_status = CASE WHEN EXISTS (
+           SELECT 1 FROM chunk_vectors v
+           JOIN chunks c ON c.id = v.chunk_id WHERE c.doc_id = documents.id
+         ) THEN vector_status ELSE 'failed' END
+       WHERE id = ?`
+    ).run(job.docId)
   })()
+}
+
+type Live<T> = T | (() => T)
+
+function current<T>(value: Live<T>): T {
+  return typeof value === 'function' ? (value as () => T)() : value
 }
 
 export interface WorkerDeps {
   db: DB
-  cfg: Config
-  embedder: Embedder
+  /** getter 形式让管理端热更新模型后 worker 的下一批任务立即使用新实例。 */
+  cfg: Live<Config>
+  embedder: Live<Embedder>
+  ocrClient?: Live<OcrClient>
+  vlmClient?: Live<VlmClient>
   log?: { warn(m: string): void; info?(m: string): void }
 }
 
@@ -146,8 +172,12 @@ export async function tick(deps: WorkerDeps): Promise<boolean> {
     switch (job.stage) {
       case 'parse': {
         setDocStatus(db, doc.id, 'parsing')
-        const abs = join(deps.cfg.storageDir, doc.storageKey)
-        const result = await parseDocument(abs, doc.sourceType, doc.title, doc.id)
+        const cfg = current(deps.cfg)
+        const abs = join(cfg.storageDir, doc.storageKey)
+        const result = await parseDocument(abs, doc.sourceType, doc.title, doc.id, {
+          ocrClient: deps.ocrClient ? current(deps.ocrClient) : undefined,
+          vlmClient: deps.vlmClient ? current(deps.vlmClient) : undefined
+        })
         parsedCache.set(doc.id, result as never)
         advance(db, job.id, 'chunk')
         break
@@ -172,13 +202,28 @@ export async function tick(deps: WorkerDeps): Promise<boolean> {
           break
         }
         const drafts = chunkBlocks(parsed.blocks as never)
-        const { chunkCount } = await indexChunks(
+        const embedder = current(deps.embedder)
+        const { chunkCount, vectorCount, vectorError } = await indexChunks(
           db,
           doc.id,
           drafts,
-          deps.embedder,
-          deps.cfg.embedModel
+          embedder,
+          embedder.model
         )
+
+        db.prepare(
+          `UPDATE documents
+              SET fts_status = ?, vector_status = ?, index_model_version = ?
+            WHERE id = ?`
+        ).run(
+          chunkCount > 0 ? 'ready' : 'failed',
+          vectorCount === chunkCount && chunkCount > 0 ? 'ready' : 'degraded',
+          embedder.model,
+          doc.id
+        )
+        if (vectorError) {
+          deps.log?.warn(`向量索引降级(${doc.title}): ${vectorError}`)
+        }
 
         // 后置校验:扫描件 PDF 没有文本层时解析器返回空内容,流程会一路
         // ready 而检索永远命中不了。这里主动判失败,让管理员看到原因。
@@ -193,10 +238,14 @@ export async function tick(deps: WorkerDeps): Promise<boolean> {
       }
 
       case 'finalize': {
-        db.prepare(
-          "UPDATE documents SET status = 'ready', indexed_at = ?, updated_at = ?, fail_reason = NULL WHERE id = ?"
-        ).run(Date.now(), Date.now(), doc.id)
-        complete(db, job.id)
+        const now = Date.now()
+        db.transaction(() => {
+          db.prepare(
+            "UPDATE documents SET status = 'ready', indexed_at = ?, updated_at = ?, fail_reason = NULL WHERE id = ?"
+          ).run(now, now, doc.id)
+          activateDocumentVersion(db, doc.id, now)
+          complete(db, job.id)
+        })()
         parsedCache.delete(doc.id)
         deps.log?.info?.(`摄取完成: ${doc.title}`)
         break

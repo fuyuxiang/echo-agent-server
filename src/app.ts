@@ -22,11 +22,16 @@ import { registerMemoryRoutes } from './routes/memories.js'
 import { registerLlmRoutes } from './routes/llm.js'
 import { registerSyncRoutes } from './routes/sync.js'
 import { registerQualityRoutes } from './routes/quality.js'
+import { registerDocumentSubmissionRoutes } from './routes/document-submissions.js'
+import { registerBootstrapRoutes } from './routes/bootstrap.js'
+import { registerKnowledgeAskRoutes } from './routes/knowledge-ask.js'
+import { registerSkillRoutes } from './routes/skills.js'
 import { registerMcpRoutes } from './mcp.js'
 import { registerWeb } from './web.js'
 import { createOcrClient } from './kb/services/ocr.js'
 import { createVlmClient } from './kb/services/vlm.js'
 import type { Deps, ThrottleLike } from './types.js'
+import { VECTOR_INDEX_DIM } from './kb/vector-schema.js'
 
 export interface BuildOptions {
   db: DB
@@ -126,17 +131,22 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
     // 从模型名看不出差别 —— 而两者的检索质量差一个量级。
     const ocrConfigured = deps.ocrClient.configured
     const vlmConfigured = deps.vlmClient.configured
+    const dimensionCompatible = deps.embedder.dim === VECTOR_INDEX_DIM
     const allReal =
       deps.embedder.semantic &&
       deps.reranker.crossEncoder &&
       ocrConfigured &&
-      vlmConfigured
+      vlmConfigured &&
+      dimensionCompatible
     return {
       ok: true,
       version: 1,
       schemaVersion: db.pragma('user_version', { simple: true }),
       models: {
         embedder: deps.embedder.model,
+        embedDim: deps.embedder.dim,
+        vectorIndexDim: VECTOR_INDEX_DIM,
+        dimensionCompatible,
         semantic: deps.embedder.semantic,
         reranker: deps.reranker.model,
         crossEncoder: deps.reranker.crossEncoder,
@@ -149,10 +159,14 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   })
 
   registerAuthRoutes(app)
+  registerBootstrapRoutes(app)
   registerRetrieveRoutes(app)
+  registerKnowledgeAskRoutes(app)
   registerModelConfigRoutes(app)
   registerAdminRoutes(app)
   registerDocsRoutes(app)
+  registerDocumentSubmissionRoutes(app)
+  registerSkillRoutes(app)
   registerPromotionRoutes(app)
   registerMemoryRoutes(app)
   registerLlmRoutes(app)

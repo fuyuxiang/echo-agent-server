@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { openDb, type DB } from './db/index.js'
-import { loadConfig, type Config } from './config.js'
+import { loadConfig, loadConfigFromDb, type Config } from './config.js'
 import { countUsers, createUser } from './dao/users.js'
 import { purgeExpiredRefreshTokens } from './auth/jwt.js'
 import { IngestWorker } from './kb/ingest/worker.js'
 import { buildApp } from './app.js'
+import { VECTOR_INDEX_DIM } from './kb/vector-schema.js'
 
 /**
  * 首次启动的初始化。
@@ -53,11 +54,21 @@ export async function ensureInitialAdmin(db: DB, cfg: Config): Promise<void> {
 }
 
 export async function start(): Promise<void> {
-  const cfg = loadConfig()
-  const db = openDb({ path: cfg.dbPath })
+  const envCfg = loadConfig()
+  const db = openDb({ path: envCfg.dbPath })
 
   ensureOrgScope(db)
-  await ensureInitialAdmin(db, cfg)
+  await ensureInitialAdmin(db, envCfg)
+
+  // 管理员在 Web 端修改的模型配置是权威配置，重启后也必须恢复。
+  // 向量维度不匹配时拒绝启动，避免服务“看起来健康”却持续摄取失败。
+  const cfg = loadConfigFromDb(db, envCfg)
+  if (cfg.embedDim !== VECTOR_INDEX_DIM) {
+    db.close()
+    throw new Error(
+      `嵌入维度 ${cfg.embedDim} 与当前向量索引维度 ${VECTOR_INDEX_DIM} 不一致，需要全量重建索引`
+    )
+  }
 
   const purged = purgeExpiredRefreshTokens(db)
   if (purged > 0) {
@@ -71,8 +82,10 @@ export async function start(): Promise<void> {
   // 表现是"上传成功但文档永远停在 pending",且没有任何报错。
   const worker = new IngestWorker({
     db,
-    cfg,
-    embedder: app.deps.embedder,
+    cfg: () => app.deps.cfg,
+    embedder: () => app.deps.embedder,
+    ocrClient: () => app.deps.ocrClient,
+    vlmClient: () => app.deps.vlmClient,
     log: {
       warn: (m) => console.warn(`[echo-server] ${m}`),
       info: (m) => console.log(`[echo-server] ${m}`)

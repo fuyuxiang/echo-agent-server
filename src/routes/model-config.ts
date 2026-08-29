@@ -6,6 +6,7 @@ import { requireAdmin, type AuthedRequest } from '../auth/jwt.js'
 import { loadConfigFromDb } from '../config.js'
 import { createEmbedder } from '../models/embedder.js'
 import { createReranker } from '../models/reranker.js'
+import { VECTOR_INDEX_DIM } from '../kb/vector-schema.js'
 
 /** PUT 时的 warn,落到 stderr —— 与启动期 createEmbedder/createReranker 保持一致。 */
 const hotWarn = (m: string): void => {
@@ -48,10 +49,12 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
     return {
       runtime: {
         embedder: e.model,
+        embedDim: e.dim,
+        dimensionCompatible: e.dim === VECTOR_INDEX_DIM,
         semantic: e.semantic,
         reranker: r.model,
         crossEncoder: r.crossEncoder,
-        productionReady: e.semantic && r.crossEncoder
+        productionReady: e.semantic && r.crossEncoder && e.dim === VECTOR_INDEX_DIM
       }
     }
   }
@@ -112,6 +115,14 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
         return reply.code(400).send(fail(4001, `参数错误: ${parsed.error.issues[0]?.message}`))
       }
       const v = parsed.data
+      if (v.embedDim !== VECTOR_INDEX_DIM) {
+        return reply.code(409).send(
+          fail(
+            4092,
+            `当前向量索引维度固定为 ${VECTOR_INDEX_DIM}，不能热切换为 ${v.embedDim}；请先执行全量重建索引迁移`
+          )
+        )
+      }
       const actor = (req as AuthedRequest).claims.sub
       const enc = v.chatKey ? encryptSecret(v.chatKey, masterKey) : null
 

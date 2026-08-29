@@ -9,4 +9,7 @@ eval/reports/
 data/
 logs/
 run/
-
+backups/
+.env.production
+deploy/secrets/*
+!deploy/secrets/.gitkeep

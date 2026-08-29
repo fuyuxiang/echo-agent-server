@@ -163,6 +163,40 @@ export interface Promotion {
   reviewerName?: string | null
 }
 
+export interface DocumentSubmission {
+  id: string
+  title: string
+  sourceType: string
+  byteSize: number
+  sensitivity: number
+  volatility: 'stable' | 'volatile'
+  tags: string[]
+  state: PromotionState
+  createdAt: number
+  targetScope: string
+  scopeName: string
+  scopeKind: ScopeKind
+  submitterId: string
+  submitterName: string
+}
+
+export interface SkillSubmission {
+  submissionId: string
+  skillId: string
+  name: string
+  description: string
+  version: string
+  packageBytes: number
+  hash: string
+  state: 'pending' | 'approved' | 'rejected' | 'revoked'
+  createdAt: number
+  scopeId: string
+  scopeName: string
+  scopeKind: ScopeKind
+  submitterId: string
+  submitterName: string
+}
+
 export interface ModelConfig {
   configured: boolean
   chatProvider: string | null

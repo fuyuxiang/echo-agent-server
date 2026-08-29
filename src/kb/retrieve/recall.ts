@@ -47,7 +47,8 @@ const SELECT_FIELDS = `
 
 const JOINS = `
   JOIN documents d ON d.id = c.doc_id
-  JOIN scopes    s ON s.id = c.scope_id
+  LEFT JOIN document_families df ON df.id = d.family_id
+  JOIN v_effective_scopes s ON s.id = c.scope_id
   LEFT JOIN users o ON o.id = d.owner_id
 `
 
@@ -64,7 +65,9 @@ function accessClause(ctx: AccessContext): { sql: string; params: unknown[] } {
   return {
     sql: `c.scope_id IN (${placeholders})
           AND c.sensitivity <= ?
-          AND d.status = 'ready'`,
+          AND d.status = 'ready'
+          AND (d.family_id IS NULL OR
+               (df.current_document_id = d.id AND df.state = 'active'))`,
     params: [...ctx.scopeIds, ctx.clearance]
   }
 }
@@ -228,7 +231,7 @@ export function searchMemories(
   const sql = `
     SELECT m.id, m.kind, m.content, s.kind AS scopeKind, m.confidence
       FROM org_memories m
-      JOIN scopes s ON s.id = m.scope_id
+      JOIN v_effective_scopes s ON s.id = m.scope_id
      WHERE m.scope_id IN (${placeholders})
        AND m.status = 'active'
        AND (${likeClause})

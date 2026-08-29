@@ -30,7 +30,9 @@ export interface RetrieveRequest {
    * 即使客户端传入,服务端仍按"用户可见 scope � 请求 scope"做交集,
    * 防止越权。
    */
-  scopes?: Array<'org' | 'team'>
+  scopes?: Array<'personal' | 'org' | 'team'>
+  /** 显式 scope id 子集；只能从实时授权范围中继续收窄。 */
+  scopeIds?: string[]
 }
 
 export interface Citation {
@@ -121,12 +123,14 @@ export class Retriever {
     // 服务端按"用户可见 scope � 客户端请求 scope"二次收敛。
     // 即使客户端误传越权 scope,这里也会被裁掉。
     if (req.scopes && req.scopes.length > 0) {
-      const kindOf = (sid: string): 'org' | 'team' | null => {
+      const kindOf = (sid: string): 'personal' | 'org' | 'team' | null => {
         const r = this.deps.db
-          .prepare('SELECT kind FROM scopes WHERE id = ?')
+          .prepare('SELECT kind FROM v_effective_scopes WHERE id = ?')
           .get(sid) as { kind: string } | undefined
         if (!r) return null
-        return r.kind === 'org' || r.kind === 'team' ? r.kind : null
+        return r.kind === 'org' || r.kind === 'team' || r.kind === 'personal'
+          ? (r.kind as 'org' | 'team' | 'personal')
+          : null
       }
       const filtered: string[] = []
       for (const sid of ctx.scopeIds) {
@@ -137,6 +141,12 @@ export class Retriever {
         return this.empty(t0)
       }
       // 重写 ctx.scopeIds,后续 SQL 内联权限使用新值。
+      ;(ctx as { scopeIds: string[] }).scopeIds = filtered
+    }
+    if (req.scopeIds && req.scopeIds.length > 0) {
+      const requested = new Set(req.scopeIds)
+      const filtered = ctx.scopeIds.filter((id) => requested.has(id))
+      if (filtered.length === 0) return this.empty(t0)
       ;(ctx as { scopeIds: string[] }).scopeIds = filtered
     }
 
@@ -309,7 +319,7 @@ export class Retriever {
         modality: c.modality,
         sourceType: c.sourceType,
         // 来源层级:L2 = 团队,L3 = 组织。L1 由桌面端合并层补。
-        source: c.scopeKind === 'team' ? 'L2' : 'L3',
+        source: c.scopeKind === 'personal' ? 'L1' : c.scopeKind === 'team' ? 'L2' : 'L3',
         citation: {
           page: c.locPage,
           heading: c.heading ?? '',
@@ -334,9 +344,12 @@ export class Retriever {
       .prepare(
         `SELECT DISTINCT u.id AS userId, u.display_name AS displayName, COUNT(*) AS n
            FROM documents d
+           LEFT JOIN document_families df ON df.id = d.family_id
            JOIN users u ON u.id = d.owner_id
           WHERE d.scope_id IN (${placeholders})
             AND d.status = 'ready'
+            AND (d.family_id IS NULL OR
+                 (df.current_document_id = d.id AND df.state = 'active'))
             AND d.sensitivity <= ?
             AND u.status = 'active'
           GROUP BY u.id

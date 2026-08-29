@@ -197,9 +197,12 @@ export function registerAdminRoutes(app: FastifyInstance): void {
       // 下拉框会列出他无权写入的范围。
       const sql =
         claims.role === 'admin'
-          ? `SELECT s.id, s.kind, s.name, s.group_id AS groupId FROM scopes s ORDER BY s.kind, s.name`
-          : `SELECT s.id, s.kind, s.name, s.group_id AS groupId
-               FROM scopes s
+          ? `SELECT s.id, s.kind, s.name, s.group_id AS groupId,
+                    s.owner_user_id AS ownerUserId
+               FROM v_effective_scopes s ORDER BY s.kind, s.name`
+          : `SELECT s.id, s.kind, s.name, s.group_id AS groupId,
+                    s.owner_user_id AS ownerUserId
+               FROM v_effective_scopes s
                JOIN v_user_scopes v ON v.scope_id = s.id
               WHERE v.user_id = ?
               ORDER BY s.kind, s.name`

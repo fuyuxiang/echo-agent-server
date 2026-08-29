@@ -3,6 +3,7 @@ import type { DB } from '../../db/index.js'
 import type { Embedder } from '../../models/embedder.js'
 import { indexableText } from '../retrieve/text.js'
 import type { ChunkDraft } from './chunk.js'
+import { VECTOR_INDEX_DIM } from '../vector-schema.js'
 
 /**
  * 把分块结果写入三个存储:chunks(权威) + chunks_fts(BM25) + chunk_vectors(语义)。
@@ -16,7 +17,9 @@ const EMBED_BATCH = 32
 
 export interface IndexResult {
   chunkCount: number
+  vectorCount: number
   skipped: number
+  vectorError?: string
 }
 
 export function deleteChunks(db: DB, docId: string): void {
@@ -57,13 +60,18 @@ export async function indexChunks(
   embedder: Embedder,
   modelVersion: string
 ): Promise<IndexResult> {
+  if (embedder.dim !== VECTOR_INDEX_DIM) {
+    throw new Error(
+      `嵌入模型维度 ${embedder.dim} 与向量索引维度 ${VECTOR_INDEX_DIM} 不一致`
+    )
+  }
   const doc = db
     .prepare('SELECT scope_id AS scopeId, sensitivity FROM documents WHERE id = ?')
     .get(docId) as { scopeId: string; sensitivity: number } | undefined
   if (!doc) throw new Error(`文档不存在: ${docId}`)
 
   deleteChunks(db, docId)
-  if (drafts.length === 0) return { chunkCount: 0, skipped: 0 }
+  if (drafts.length === 0) return { chunkCount: 0, vectorCount: 0, skipped: 0 }
 
   const now = Date.now()
   const insChunk = db.prepare(`
@@ -81,7 +89,9 @@ export async function indexChunks(
   `)
 
   let written = 0
+  let vectorCount = 0
   let skipped = 0
+  let vectorError: string | undefined
 
   // 分批嵌入:一次全量会在大文档上撑爆远端 API 的请求体上限。
   for (let start = 0; start < drafts.length; start += EMBED_BATCH) {
@@ -91,8 +101,9 @@ export async function indexChunks(
       vectors = await embedder.embedBatch(batch.map((d) => d.embedText))
     } catch (e) {
       // 嵌入失败不能让整篇文档白摄取:仍写 chunks 与 FTS,
-      // 向量留空。后续可用 embedding_meta 的缺失来补建。
+      // 向量留空。文档会显式标为 vector_status=degraded，后续重建。
       vectors = []
+      vectorError = e instanceof Error ? e.message : String(e)
     }
 
     // 事务边界放在批内:一批要么全写要么全不写,避免半批数据。
@@ -126,13 +137,19 @@ export async function indexChunks(
         insMeta.run(chunkId, modelVersion, ftsRowid, now)
 
         const vec = vectors[i]
-        if (vec) insVec.run(chunkId, new Float32Array(vec))
+        if (vec) {
+          if (vec.length !== embedder.dim) {
+            throw new Error(`嵌入维度不符: 期望 ${embedder.dim}, 实得 ${vec.length}`)
+          }
+          insVec.run(chunkId, new Float32Array(vec))
+          vectorCount++
+        }
         written++
       })
     })()
   }
 
-  return { chunkCount: written, skipped }
+  return { chunkCount: written, vectorCount, skipped, vectorError }
 }
 
 /**

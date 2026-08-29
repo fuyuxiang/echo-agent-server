@@ -63,3 +63,22 @@ export const imageCaptionParser: Parser = {
     ]
   }
 }
+
+/** 生产注入入口，确保 health 展示与实际摄取使用同一个 VLM 实例。 */
+export function createImageCaptionParser(vlm: VlmClient): Parser {
+  return {
+    sourceType: 'image',
+    async parse(buf: Buffer, ctx?: { fileName?: string }): Promise<ParserUnit[]> {
+      if (!vlm.configured) return []
+      const mime = mimeFromName(ctx?.fileName ?? 'image.png')
+      const caption = (await vlm.caption(buf, mime)).trim()
+      if (!caption || /^\[(?:VLM|图片).*未配置/.test(caption)) return []
+      return [
+        {
+          text: caption,
+          location: { kind: 'page_section', page: 1, section: 'image-caption' }
+        }
+      ]
+    }
+  }
+}

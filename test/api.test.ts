@@ -312,8 +312,8 @@ describe('权限与角色', () => {
       headers: bearer(accessToken)
     })
     const kinds = res.json().data.map((s: { kind: string }) => s.kind)
-    // alice 不属于财务部,只应看到 org
-    expect(kinds).toEqual(['org'])
+    // alice 不属于财务部，但每个用户始终拥有自己的 personal scope。
+    expect(kinds).toEqual(['org', 'personal'])
   })
 })
 

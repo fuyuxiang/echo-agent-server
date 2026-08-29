@@ -24,6 +24,17 @@ export type AuditAction =
   | 'memory_retire'
   | 'promotion_create'
   | 'promotion_withdraw'
+  | 'document_submit'
+  | 'document_withdraw'
+  | 'document_review_download'
+  | 'knowledge_ask'
+  | 'skill_submit'
+  | 'skill_publish'
+  | 'skill_approve'
+  | 'skill_reject'
+  | 'skill_download'
+  | 'skill_review_download'
+  | 'skill_revoke'
 
 /**
  * 审计写入。

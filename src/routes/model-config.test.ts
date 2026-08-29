@@ -114,7 +114,7 @@ describe('模型配置热加载', () => {
     expect(app.deps.reranker.model).toBe('rerank-v2')
   })
 
-  it('embedDim 改变后,/api/v1/health 立刻反映新维度', async () => {
+  it('拒绝把 embedDim 热切换到与物理向量表不同的维度', async () => {
     const token = await login(app, 'admin', 'admin-password')
 
     expect(app.deps.embedder.dim).toBe(1024)
@@ -131,9 +131,10 @@ describe('模型配置热加载', () => {
         rerankModel: 'rerank-v1'
       }
     })
-    expect(put.statusCode).toBe(200)
+    expect(put.statusCode).toBe(409)
+    expect(put.json().msg).toContain('全量重建索引')
 
-    expect(app.deps.embedder.dim).toBe(2048)
+    expect(app.deps.embedder.dim).toBe(1024)
   })
 
   it('GET /api/v1/model-config 在 PUT 后返回的 runtime 信息同步更新', async () => {

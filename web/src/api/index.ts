@@ -14,6 +14,8 @@ import type {
   ModelConfig,
   QualityOverview,
   AuditLog,
+  DocumentSubmission,
+  SkillSubmission,
 } from '../types'
 
 // 所有路径都带 /api/v1 前缀。旧版无前缀的路径已不存在 —— 上一版前端调用
@@ -137,6 +139,32 @@ export const approvePromotion = (
 
 export const rejectPromotion = (id: string, note: string): Promise<unknown> =>
   client.post(`/api/v1/promotions/${id}/reject`, { note })
+
+export const listDocumentSubmissions = (state = 'pending'): Promise<DocumentSubmission[]> =>
+  client.get('/api/v1/document-submissions', { params: { state } })
+
+export const approveDocumentSubmission = (id: string, note?: string): Promise<unknown> =>
+  client.post(`/api/v1/document-submissions/${id}/approve`, { note })
+
+export const rejectDocumentSubmission = (id: string, note: string): Promise<unknown> =>
+  client.post(`/api/v1/document-submissions/${id}/reject`, { note })
+
+export const downloadDocumentSubmission = (id: string): Promise<Blob> =>
+  client.get(`/api/v1/document-submissions/${id}/raw`, { responseType: 'blob' })
+
+export const listSkillSubmissions = (state = 'pending'): Promise<SkillSubmission[]> =>
+  client.get('/api/v1/admin/skill-submissions', { params: { state } })
+
+export const approveSkillSubmission = (
+  id: string,
+  body: { note?: string; mandatory?: boolean; allowPersonalOverride?: boolean },
+): Promise<unknown> => client.post(`/api/v1/admin/skill-submissions/${id}/approve`, body)
+
+export const rejectSkillSubmission = (id: string, note: string): Promise<unknown> =>
+  client.post(`/api/v1/admin/skill-submissions/${id}/reject`, { note })
+
+export const downloadSkillSubmission = (id: string): Promise<Blob> =>
+  client.get(`/api/v1/admin/skill-submissions/${id}/package`, { responseType: 'blob' })
 
 // ── 组织记忆 ──────────────────────────────────────────────────────────────
 export const listMemories = (params: {

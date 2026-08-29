@@ -70,6 +70,15 @@ export async function createUser(db: DB, input: CreateUserInput): Promise<UserRo
       input.clearance ?? 0,
       now
     )
+    // 每个服务端用户都有且只有一个个人云 Scope。物理 kind 仍为 team
+    // （兼容 001 的 CHECK），v_effective_scopes 对外呈现 personal。
+    const personalScopeId = `personal-${id}`
+    db.prepare(
+      "INSERT INTO scopes (id, kind, group_id, name) VALUES (?, 'team', NULL, ?)"
+    ).run(personalScopeId, '我的空间')
+    db.prepare(
+      'INSERT INTO personal_scope_owners (scope_id, user_id) VALUES (?,?)'
+    ).run(personalScopeId, id)
     for (const gid of input.groupIds ?? []) {
       db.prepare('INSERT OR IGNORE INTO user_groups (user_id, group_id) VALUES (?,?)').run(id, gid)
     }

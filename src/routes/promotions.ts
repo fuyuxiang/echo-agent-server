@@ -5,6 +5,7 @@ import { ok, fail } from '../reply.js'
 import { requireCurator, type AuthedRequest } from '../auth/jwt.js'
 import { loadAccessContext, canAccessScope } from '../auth/scopes.js'
 import { enqueueIngest } from '../kb/ingest/worker.js'
+import { createDocumentFamily } from '../dao/documents.js'
 
 /**
  * 知识提升。
@@ -111,7 +112,7 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
                 s.name AS scopeName, s.kind AS scopeKind,
                 r.display_name AS reviewerName
            FROM promotions p
-           JOIN scopes s ON s.id = p.target_scope
+           JOIN v_effective_scopes s ON s.id = p.target_scope
            LEFT JOIN users r ON r.id = p.reviewer_id
           WHERE p.submitter_id = ?
           ORDER BY p.created_at DESC
@@ -150,7 +151,7 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
                   s.name AS scopeName, s.kind AS scopeKind,
                   u.display_name AS submitterName, u.id AS submitterId
              FROM promotions p
-             JOIN scopes s ON s.id = p.target_scope
+             JOIN v_effective_scopes s ON s.id = p.target_scope
              JOIN users u ON u.id = p.submitter_id
             WHERE ${where.join(' AND ')}
             ORDER BY p.created_at
@@ -236,11 +237,17 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
         const storageKey = await storage.put(buf, 'md')
         resultId = randomUUID()
         const now = Date.now()
+        const familyId = createDocumentFamily(db, {
+          scopeId: promo.targetScope,
+          title: v.title,
+          ownerId: promo.submitterId,
+          now
+        })
         db.prepare(
           `INSERT INTO documents (id, scope_id, title, source_type, storage_key, content_hash,
                                   byte_size, owner_id, sensitivity, volatility, status,
-                                  created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,0,?,'pending',?,?)`
+                                  family_id, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?,0,?,'pending',?,?,?)`
         ).run(
           resultId,
           promo.targetScope,
@@ -251,6 +258,7 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
           buf.length,
           promo.submitterId,
           v.volatility ?? 'stable',
+          familyId,
           now,
           now
         )

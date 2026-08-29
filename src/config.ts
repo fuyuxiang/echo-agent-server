@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { readFileSync } from 'node:fs'
 
 // 启动即校验:缺失或格式错误的配置在 listen 之前失败,
 // 而不是等到第一个请求打进来才炸。
@@ -55,6 +56,21 @@ const Schema = z.object({
 
 export type Config = z.infer<typeof Schema>
 
+/** Docker/Kubernetes secrets can be mounted as files instead of appearing in
+ * `docker inspect` output. Direct environment values remain supported for
+ * local development and take precedence when both forms are present. */
+function secretValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const direct = env[key]
+  if (direct !== undefined && direct !== '') return direct
+  const file = env[`${key}_FILE`]
+  if (!file) return direct
+  try {
+    return readFileSync(file, 'utf8').trimEnd()
+  } catch (error) {
+    throw new Error(`无法读取 ${key}_FILE (${file}): ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = Schema.safeParse({
     port: env.ECHO_PORT,
@@ -62,24 +78,24 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     dbPath: env.ECHO_DB_PATH,
     storageDir: env.ECHO_STORAGE_DIR,
     modelDir: env.ECHO_MODEL_DIR,
-    jwtSecret: env.ECHO_JWT_SECRET,
-    masterKey: env.ECHO_MASTER_KEY,
+    jwtSecret: secretValue(env, 'ECHO_JWT_SECRET'),
+    masterKey: secretValue(env, 'ECHO_MASTER_KEY'),
     accessTokenTtl: env.ECHO_ACCESS_TTL,
     refreshTokenTtlMs: env.ECHO_REFRESH_TTL_MS,
     embedDim: env.ECHO_EMBED_DIM,
     embedModel: env.ECHO_EMBED_MODEL,
     rerankModel: env.ECHO_RERANK_MODEL,
     embedUrl: env.ECHO_EMBED_URL,
-    embedKey: env.ECHO_EMBED_KEY,
+    embedKey: secretValue(env, 'ECHO_EMBED_KEY'),
     rerankUrl: env.ECHO_RERANK_URL,
-    rerankKey: env.ECHO_RERANK_KEY,
+    rerankKey: secretValue(env, 'ECHO_RERANK_KEY'),
     ocrUrl: env.ECHO_OCR_URL,
     vlmUrl: env.ECHO_VLM_URL,
-    vlmKey: env.ECHO_VLM_KEY,
+    vlmKey: secretValue(env, 'ECHO_VLM_KEY'),
     maxUploadBytes: env.ECHO_MAX_UPLOAD_BYTES,
     staleDays: env.ECHO_STALE_DAYS,
     initialAdminUser: env.ECHO_ADMIN_USER,
-    initialAdminPassword: env.ECHO_ADMIN_PASSWORD,
+    initialAdminPassword: secretValue(env, 'ECHO_ADMIN_PASSWORD'),
     corsOrigins: env.ECHO_CORS_ORIGINS,
     rateLimitRetrievePerMin: env.ECHO_RATE_LIMIT_RETRIEVE,
     rateLimitLlmPerMin: env.ECHO_RATE_LIMIT_LLM,

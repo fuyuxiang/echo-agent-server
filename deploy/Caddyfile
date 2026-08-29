@@ -1,0 +1,32 @@
+{
+  admin off
+}
+
+{$ECHO_PUBLIC_DOMAIN} {
+  encode zstd gzip
+
+  request_body {
+    max_size 200MB
+  }
+
+  reverse_proxy echo-server:8787 {
+    # Agentic RAG uses SSE. Immediate flushing avoids answers being buffered
+    # until the final event by the internet-facing reverse proxy.
+    flush_interval -1
+    transport http {
+      dial_timeout 5s
+    }
+  }
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "no-referrer"
+    -Server
+  }
+
+  log {
+    output stdout
+    format json
+  }
+}

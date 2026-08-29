@@ -5,11 +5,13 @@ import { textParser } from '../parsers/text.js'
 import { docxParser } from '../parsers/docx.js'
 import { pptxParser } from '../parsers/pptx.js'
 import { xlsxParser } from '../parsers/xlsx.js'
-import { imageParser, imageCaptionParser } from '../parsers/image.js'
+import { imageCaptionParser, createImageCaptionParser } from '../parsers/image.js'
 // pdfParser 依赖 pdf-parse/pdfjs-dist（要求 Node 18+）。改为按需加载，
 // 避免在 Node 16 之类的旧版本上启动时直接崩溃。
 import { audioParser, videoParser, mediaParserFor } from '../parsers/media.js'
 import type { ParserUnit } from '../parsers/types.js'
+import type { OcrClient } from '../services/ocr.js'
+import type { VlmClient } from '../services/vlm.js'
 
 export interface ParseResult {
   blocks: Block[]
@@ -114,7 +116,8 @@ export async function parseDocument(
   filePath: string,
   sourceType: SourceType,
   fileName: string,
-  docId: string
+  docId: string,
+  services?: { ocrClient?: OcrClient; vlmClient?: VlmClient }
 ): Promise<ParseResult> {
   const buf = await readFile(filePath)
 
@@ -147,9 +150,10 @@ export async function parseDocument(
       return { blocks: units.map(unitToBlock), pageCount: null }
     }
     case 'image': {
-      // 图片默认走 caption 通道:无 VLM 时产出占位 caption,后续接入真实
-      // VLM 后这里改为 caption-only 路径。
-      const units = await imageCaptionParser.parse(buf, { docId, fileName })
+      const parser = services?.vlmClient
+        ? createImageCaptionParser(services.vlmClient)
+        : imageCaptionParser
+      const units = await parser.parse(buf, { docId, fileName })
       return { blocks: units.map(unitToBlock), pageCount: null }
     }
     case 'audio': {
@@ -161,8 +165,9 @@ export async function parseDocument(
       return { blocks: units.map(unitToBlock), pageCount: null }
     }
     case 'pdf': {
-      const { pdfParser } = await import('../parsers/pdf.js')
-      const units = await pdfParser.parse(buf, { docId, fileName })
+      const { pdfParser, createPdfParser } = await import('../parsers/pdf.js')
+      const parser = services?.ocrClient ? createPdfParser(services.ocrClient) : pdfParser
+      const units = await parser.parse(buf, { docId, fileName })
       const pages = new Set(
         units
           .map((u) => (u.location.kind === 'page_section' ? u.location.page : undefined))

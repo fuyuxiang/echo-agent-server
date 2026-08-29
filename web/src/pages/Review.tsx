@@ -1,11 +1,15 @@
 import { useEffect, useState, useCallback } from 'react'
 import {
   Card, Button, Space, Tag, Input, Modal, Form, Empty, message, Segmented,
-  Descriptions, Spin, Alert,
+  Descriptions, Spin, Alert, Tabs, Switch,
 } from 'antd'
-import { CheckOutlined, CloseOutlined, EditOutlined } from '@ant-design/icons'
+import { CheckOutlined, CloseOutlined, DownloadOutlined, EditOutlined } from '@ant-design/icons'
 import * as api from '../api'
-import type { Promotion, MemoryPayload, DocumentPayload, PromotionState } from '../types'
+import type {
+  Promotion, MemoryPayload, DocumentPayload, PromotionState,
+  DocumentSubmission, SkillSubmission,
+} from '../types'
+import { loadAuth } from '../store/auth'
 import { fmtRelative, memoryKindLabel, sourceLabel } from '../utils/format'
 
 /**
@@ -16,6 +20,26 @@ import { fmtRelative, memoryKindLabel, sourceLabel } from '../utils/format'
  * 进组织库,要么让提交人反复返工,几次之后就没人愿意再提了。
  */
 export default function Review() {
+  const [queue, setQueue] = useState('knowledge')
+  return (
+    <>
+      <Tabs
+        activeKey={queue}
+        onChange={setQueue}
+        items={[
+          { key: 'knowledge', label: '知识条目' },
+          { key: 'documents', label: '文档发布' },
+          { key: 'skills', label: 'Skill 发布' },
+        ]}
+      />
+      {queue === 'knowledge' && <PromotionReview />}
+      {queue === 'documents' && <DocumentSubmissionReview />}
+      {queue === 'skills' && <SkillSubmissionReview />}
+    </>
+  )
+}
+
+function PromotionReview() {
   const [state, setState] = useState<PromotionState>('pending')
   const [items, setItems] = useState<Promotion[]>([])
   const [loading, setLoading] = useState(false)
@@ -156,6 +180,103 @@ export default function Review() {
         onCancel={() => setEditing(null)}
         onOk={(edits, note) => editing && approve(editing, edits, note)}
       />
+    </>
+  )
+}
+
+function rejectWithReason(title: string, action: (note: string) => Promise<unknown>, reload: () => void): void {
+  let note = ''
+  Modal.confirm({
+    title,
+    content: <Input.TextArea rows={3} placeholder="说明驳回原因，该内容会展示给提交人" onChange={(event) => { note = event.target.value }} />,
+    okText: '驳回',
+    okButtonProps: { danger: true },
+    onOk: async () => {
+      if (!note.trim()) {
+        message.error('请填写驳回原因')
+        throw new Error('need note')
+      }
+      await action(note.trim())
+      message.success('已驳回')
+      reload()
+    },
+  })
+}
+
+async function saveReviewFile(load: () => Promise<Blob>, fileName: string): Promise<void> {
+  const blob = await load()
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = fileName
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+function DocumentSubmissionReview(): JSX.Element {
+  const [state, setState] = useState<PromotionState>('pending')
+  const [items, setItems] = useState<DocumentSubmission[]>([])
+  const [loading, setLoading] = useState(false)
+  const load = useCallback(async () => {
+    setLoading(true)
+    try { setItems(await api.listDocumentSubmissions(state)) } finally { setLoading(false) }
+  }, [state])
+  useEffect(() => { void load() }, [load])
+  return (
+    <>
+      <Space style={{ marginBottom: 16 }}>
+        <Segmented value={state} onChange={(value) => setState(value as PromotionState)} options={[
+          { label: '待审核', value: 'pending' }, { label: '已通过', value: 'approved' }, { label: '已驳回', value: 'rejected' },
+        ]} />
+        <Button onClick={() => void load()}>刷新</Button>
+      </Space>
+      {loading ? <Spin /> : items.length === 0 ? <Empty description="暂无文档提交" /> : (
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          {items.map((item) => <Card key={item.id} size="small" title={<Space wrap><Tag color="cyan">文档</Tag><strong>{item.title}</strong><span>{item.submitterName} 提交 · {fmtRelative(item.createdAt)}</span><Tag color={item.scopeKind === 'org' ? 'blue' : 'geekblue'}>{item.scopeName}</Tag></Space>} extra={<Space><Button size="small" icon={<DownloadOutlined />} onClick={() => void saveReviewFile(() => api.downloadDocumentSubmission(item.id), item.title)}>下载审阅</Button>{state === 'pending' && <><Button type="primary" size="small" icon={<CheckOutlined />} onClick={async () => { await api.approveDocumentSubmission(item.id); message.success('已通过，文档开始建立索引'); void load() }}>通过</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => rejectWithReason('驳回文档提交', (note) => api.rejectDocumentSubmission(item.id, note), () => void load())}>驳回</Button></>}</Space>}>
+            <Descriptions size="small" column={3}><Descriptions.Item label="类型">{item.sourceType.toUpperCase()}</Descriptions.Item><Descriptions.Item label="大小">{(item.byteSize / 1024).toFixed(1)} KB</Descriptions.Item><Descriptions.Item label="密级">{item.sensitivity}</Descriptions.Item><Descriptions.Item label="标签" span={3}>{item.tags.length ? item.tags.map((tag) => <Tag key={tag}>{tag}</Tag>) : '无'}</Descriptions.Item></Descriptions>
+          </Card>)}
+        </Space>
+      )}
+    </>
+  )
+}
+
+function SkillSubmissionReview(): JSX.Element {
+  const [state, setState] = useState<'pending' | 'approved' | 'rejected'>('pending')
+  const [items, setItems] = useState<SkillSubmission[]>([])
+  const [loading, setLoading] = useState(false)
+  const isAdmin = loadAuth()?.user.role === 'admin'
+  const load = useCallback(async () => {
+    setLoading(true)
+    try { setItems(await api.listSkillSubmissions(state)) } finally { setLoading(false) }
+  }, [state])
+  useEffect(() => { void load() }, [load])
+  const approve = (item: SkillSubmission): void => {
+    let mandatory = false
+    let allowPersonalOverride = true
+    let note = ''
+    Modal.confirm({
+      title: `发布 ${item.name} v${item.version}`,
+      width: 560,
+      content: <Space direction="vertical" style={{ width: '100%' }}>
+        <Alert type="warning" showIcon message="Skill 会影响 Agent 行为，请确认来源、权限与包内文件。" />
+        {isAdmin && <><Space><Switch onChange={(value) => { mandatory = value }} />强制启用</Space><Space><Switch defaultChecked onChange={(value) => { allowPersonalOverride = value }} />允许个人同名 Skill 覆盖</Space></>}
+        <Input placeholder="审核意见（可选）" onChange={(event) => { note = event.target.value }} />
+      </Space>,
+      okText: '确认发布',
+      onOk: async () => {
+        await api.approveSkillSubmission(item.submissionId, { note: note || undefined, mandatory, allowPersonalOverride })
+        message.success('已发布，客户端下次同步生效')
+        void load()
+      },
+    })
+  }
+  return (
+    <>
+      <Space style={{ marginBottom: 16 }}><Segmented value={state} onChange={(value) => setState(value as typeof state)} options={[{ label: '待审核', value: 'pending' }, { label: '已通过', value: 'approved' }, { label: '已驳回', value: 'rejected' }]} /><Button onClick={() => void load()}>刷新</Button></Space>
+      {loading ? <Spin /> : items.length === 0 ? <Empty description="暂无 Skill 提交" /> : <Space direction="vertical" size={12} style={{ width: '100%' }}>{items.map((item) => <Card key={item.submissionId} size="small" title={<Space wrap><Tag color="purple">Skill</Tag><strong>{item.name} v{item.version}</strong><span>{item.submitterName} 提交 · {fmtRelative(item.createdAt)}</span><Tag color={item.scopeKind === 'org' ? 'blue' : 'geekblue'}>{item.scopeName}</Tag></Space>} extra={<Space><Button size="small" icon={<DownloadOutlined />} onClick={() => void saveReviewFile(() => api.downloadSkillSubmission(item.submissionId), `${item.name}-${item.version}.zip`)}>下载审阅</Button>{state === 'pending' && <><Button type="primary" size="small" icon={<CheckOutlined />} onClick={() => approve(item)}>审核发布</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => rejectWithReason('驳回 Skill', (note) => api.rejectSkillSubmission(item.submissionId, note), () => void load())}>驳回</Button></>}</Space>}><Descriptions size="small" column={2}><Descriptions.Item label="说明">{item.description}</Descriptions.Item><Descriptions.Item label="包大小">{(item.packageBytes / 1024).toFixed(1)} KB</Descriptions.Item><Descriptions.Item label="SHA-256" span={2}><code>{item.hash}</code></Descriptions.Item></Descriptions></Card>)}</Space>}
     </>
   )
 }
