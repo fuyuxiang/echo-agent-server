@@ -44,6 +44,7 @@ npm run dev
 | `ECHO_BACKUP_DIR/INTERVAL_HOURS/RETENTION` | SQLite 在线备份目录、周期和保留份数。 |
 | `ECHO_CORS_ORIGINS` | 跨域白名单；留空只允许同源。 |
 | `ECHO_COOKIE_SECURE` | HTTPS 部署保持默认 `true`；纯 HTTP 内网入口必须显式设为 `false`，否则刷新 cookie 会被浏览器丢弃。 |
+| `ECHO_TRUST_PROXY_HOPS` | Fastify 前可信反向代理层数；直连为 `0`，单层 Nginx/Caddy 为 `1`。不要填写不受控的代理层数。 |
 | `ECHO_DEBIAN_MIRROR` | Dockerfile 构建参数；受限网络下替换 Debian 源地址，例如 `http://mirrors.aliyun.com/debian`。 |
 | `ECHO_DISABLE_LOGIN_THROTTLE` | 仅 `eval`/CI 用，设为 `1` 关闭登录限流；生产保持默认关闭。 |
 | `ECHO_ACCESS_TTL` / `ECHO_REFRESH_TTL_MS` | access token 有效期（默认 `1h`）与 refresh token 有效期（默认 30 天）。 |
@@ -75,6 +76,23 @@ docker compose --env-file .env.production \
 ```
 
 该 overlay 会显式设置 `ECHO_COOKIE_SECURE=false` 并把服务端直接以 HTTP 暴露在 `ECHO_PUBLIC_PORT`（默认 8787）。**纯 HTTP 模式必须同步关闭 secure cookie**，否则浏览器不会回写 refresh token，管理后台每次重启会话都会失效；CSP 的 `upgrade-insecure-requests` 在直连模式下也会被服务端关掉，避免同源脚本被改写成 HTTPS 请求导致白屏。
+
+### 主机 Nginx + IP 地址 HTTPS
+
+内网没有域名时，可使用私有 CA 签发包含 IP SAN 的证书，让主机 Nginx 在 `8787` 终止 TLS，容器只暴露到回环地址：
+
+```bash
+docker compose --env-file .env.production \
+  -f docker-compose.yml -f deploy/docker-compose.nginx.yml \
+  up -d --build
+sudo install -m 0644 deploy/nginx-echo-agent-server.conf \
+  /etc/nginx/sites-available/echo-agent-server-https
+sudo ln -s /etc/nginx/sites-available/echo-agent-server-https \
+  /etc/nginx/sites-enabled/echo-agent-server-https
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+证书放在 `/etc/nginx/ssl/echo-agent-server/server.crt`，私钥放在同目录的 `server.key`。证书必须包含实际服务器 IP 的 `subjectAltName`；每台浏览器所在设备需信任签发它的私有 CA。Echo Agent Desktop 可将该 CA 作为 PEM 编译进组织服务专用 HTTP 客户端，信任范围不会扩展到其他请求。
 
 ## 验证
 

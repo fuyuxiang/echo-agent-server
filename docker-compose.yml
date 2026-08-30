@@ -27,6 +27,8 @@ services:
       ECHO_ANTIVIRUS_HOST: clamav
       ECHO_ANTIVIRUS_PORT: 3310
       ECHO_ANTIVIRUS_REQUIRED: "true"
+      # The bundled Caddy is the only proxy hop in front of Fastify.
+      ECHO_TRUST_PROXY_HOPS: "1"
     depends_on:
       clamav:
         condition: service_healthy

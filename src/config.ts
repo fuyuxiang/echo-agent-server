@@ -22,6 +22,9 @@ const Schema = z.object({
   refreshTokenTtlMs: z.coerce.number().int().positive().default(30 * 24 * 3600_000),
   // HTTPS 部署默认使用 Secure refresh cookie；纯 HTTP 内网部署可显式关闭。
   cookieSecure: EnvBoolean.optional(),
+  // 反向代理层数。直连默认为 0，避免客户端伪造 X-Forwarded-For；
+  // 仅当后端端口限制在 loopback 时才应设为 1。
+  trustProxyHops: z.coerce.number().int().min(0).max(4).default(0),
 
   embedDim: z.coerce.number().int().positive().default(1024),
   embedModel: z.string().default('bge-m3'),
@@ -123,6 +126,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     accessTokenTtl: env.ECHO_ACCESS_TTL,
     refreshTokenTtlMs: env.ECHO_REFRESH_TTL_MS,
     cookieSecure: env.ECHO_COOKIE_SECURE,
+    trustProxyHops: env.ECHO_TRUST_PROXY_HOPS,
     embedDim: env.ECHO_EMBED_DIM,
     embedModel: env.ECHO_EMBED_MODEL,
     rerankModel: env.ECHO_RERANK_MODEL,

@@ -8,3 +8,7 @@ services:
       ECHO_COOKIE_SECURE: "false"
     ports:
       - "${ECHO_PUBLIC_PORT:-8787}:8787"
+
+  # This overlay intentionally publishes HTTP directly without Caddy.
+  caddy:
+    profiles: ["caddy-disabled"]

@@ -50,6 +50,9 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   const { db, cfg } = opts
   const app = Fastify({
     logger: false,
+    trustProxy: cfg.trustProxyHops > 0
+      ? (_address: string, hop: number) => hop < cfg.trustProxyHops
+      : false,
     // 上传走 multipart,JSON 体不需要很大;限制在此可挡住畸形大包。
     bodyLimit: 2 * 1024 * 1024
   })

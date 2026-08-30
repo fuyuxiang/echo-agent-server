@@ -1,0 +1,16 @@
+services:
+  echo-server:
+    build:
+      args:
+        ECHO_DEBIAN_MIRROR: ${ECHO_DEBIAN_MIRROR:-}
+    environment:
+      # TLS terminates at the host Nginx. The Fastify process receives exactly
+      # one trusted proxy hop and must emit Secure refresh cookies.
+      ECHO_COOKIE_SECURE: "true"
+      ECHO_TRUST_PROXY_HOPS: "1"
+    ports:
+      - "127.0.0.1:${ECHO_BACKEND_PORT:-18787}:8787"
+
+  # TLS is terminated by Nginx on the host, so the bundled Caddy must not run.
+  caddy:
+    profiles: ["caddy-disabled"]
