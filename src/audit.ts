@@ -27,6 +27,7 @@ export type AuditAction =
   | 'document_submit'
   | 'document_withdraw'
   | 'document_review_download'
+  | 'document_scan_failed'
   | 'knowledge_ask'
   | 'skill_submit'
   | 'skill_publish'
@@ -35,6 +36,11 @@ export type AuditAction =
   | 'skill_download'
   | 'skill_review_download'
   | 'skill_revoke'
+  | 'skill_scan_failed'
+  | 'skill_preference'
+  | 'skill_disable'
+  | 'skill_rollback'
+  | 'enterprise_policy_update'
 
 /**
  * 审计写入。

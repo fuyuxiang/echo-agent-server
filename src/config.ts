@@ -1,6 +1,9 @@
 import { z } from 'zod'
 import { readFileSync } from 'node:fs'
 
+const EnvBoolean = z.union([z.boolean(), z.enum(['true', 'false', '1', '0'])])
+  .transform((value) => value === true || value === 'true' || value === '1')
+
 // 启动即校验:缺失或格式错误的配置在 listen 之前失败,
 // 而不是等到第一个请求打进来才炸。
 const Schema = z.object({
@@ -33,6 +36,13 @@ const Schema = z.object({
   ocrUrl: z.string().optional(),
   vlmUrl: z.string().optional(),
   vlmKey: z.string().optional(),
+
+  // ClamAV clamd INSTREAM 扫描。生产将 required 设为 true 后，
+  // 引擎不可用会故障关闭，不会把未扫描内容发布。
+  antivirusHost: z.string().optional(),
+  antivirusPort: z.coerce.number().int().min(1).max(65535).default(3310),
+  antivirusRequired: EnvBoolean.default(false),
+  antivirusTimeoutMs: z.coerce.number().int().min(500).max(120_000).default(30_000),
 
   maxUploadBytes: z.coerce.number().int().positive().default(200 * 1024 * 1024),
   // volatile 文档超过这个天数即在答案里标注"可能过时"
@@ -92,6 +102,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ocrUrl: env.ECHO_OCR_URL,
     vlmUrl: env.ECHO_VLM_URL,
     vlmKey: secretValue(env, 'ECHO_VLM_KEY'),
+    antivirusHost: env.ECHO_ANTIVIRUS_HOST,
+    antivirusPort: env.ECHO_ANTIVIRUS_PORT,
+    antivirusRequired: env.ECHO_ANTIVIRUS_REQUIRED,
+    antivirusTimeoutMs: env.ECHO_ANTIVIRUS_TIMEOUT_MS,
     maxUploadBytes: env.ECHO_MAX_UPLOAD_BYTES,
     staleDays: env.ECHO_STALE_DAYS,
     initialAdminUser: env.ECHO_ADMIN_USER,
@@ -108,6 +122,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       .map((i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`)
       .join('\n')
     throw new Error(`配置校验失败:\n${issues}`)
+  }
+  if (parsed.data.antivirusRequired && !parsed.data.antivirusHost) {
+    throw new Error('配置校验失败:\n  - antivirusHost: ECHO_ANTIVIRUS_REQUIRED=true 时必须配置 ECHO_ANTIVIRUS_HOST')
   }
   return parsed.data
 }

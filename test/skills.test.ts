@@ -57,8 +57,8 @@ function multipart(scopeId: string, zip: Buffer, version = '1.0.0') {
   }
 }
 
-async function submit(token: string, scopeId: string, zip: Buffer) {
-  const body = multipart(scopeId, zip)
+async function submit(token: string, scopeId: string, zip: Buffer, version = '1.0.0') {
+  const body = multipart(scopeId, zip, version)
   return app.inject({
     method: 'POST',
     url: '/api/v1/skill-submissions',
@@ -149,6 +149,14 @@ describe('Skill 个人/企业发布与同步', () => {
     expect(item.mandatory).toBe(true)
     expect(item.allowPersonalOverride).toBe(false)
 
+    const cannotDisableMandatory = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/skills/${item.skillId}/preference`,
+      headers: bearer(bobToken),
+      payload: { enabled: false }
+    })
+    expect(cannotDisableMandatory.statusCode).toBe(409)
+
     const bootstrap = await app.inject({
       method: 'GET',
       url: '/api/v1/client/bootstrap',
@@ -196,6 +204,119 @@ describe('Skill 个人/企业发布与同步', () => {
       headers: bearer(bobToken)
     })
     expect(download.statusCode).toBe(404)
+  })
+
+  it('非强制 Skill 的个人偏好会立即收紧并恢复同步清单', async () => {
+    const published = await submit(adminToken, orgScope, await skillZip('optional-guide'))
+    const skillId = published.json().data.skillId
+
+    const disabled = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/skills/${skillId}/preference`,
+      headers: bearer(bobToken),
+      payload: { enabled: false }
+    })
+    expect(disabled.statusCode).toBe(200)
+
+    const afterDisable = await app.inject({
+      method: 'GET',
+      url: '/api/v1/skills/sync?cursor=0',
+      headers: bearer(bobToken)
+    })
+    expect(afterDisable.json().data.visibleSkillIds).not.toContain(skillId)
+    expect(afterDisable.json().data.upserts).toHaveLength(0)
+
+    const detail = await app.inject({
+      method: 'GET',
+      url: `/api/v1/skills/${skillId}`,
+      headers: bearer(bobToken)
+    })
+    expect(detail.json().data.enabled).toBe(false)
+
+    const enabled = await app.inject({
+      method: 'PUT',
+      url: `/api/v1/skills/${skillId}/preference`,
+      headers: bearer(bobToken),
+      payload: { enabled: true }
+    })
+    expect(enabled.statusCode).toBe(200)
+    const afterEnable = await app.inject({
+      method: 'GET',
+      url: '/api/v1/skills/sync?cursor=0',
+      headers: bearer(bobToken)
+    })
+    expect(afterEnable.json().data.visibleSkillIds).toContain(skillId)
+    expect(afterEnable.json().data.upserts[0].skillId).toBe(skillId)
+  })
+
+  it('管理员可回滚到上一个已签名版本，并可立即全局禁用', async () => {
+    const first = await submit(
+      adminToken,
+      orgScope,
+      await skillZip('rollback-guide', '1.0.0'),
+      '1.0.0'
+    )
+    const skillId = first.json().data.skillId
+    const second = await submit(
+      adminToken,
+      orgScope,
+      await skillZip('rollback-guide', '2.0.0'),
+      '2.0.0'
+    )
+    expect(second.json().data.skillId).toBe(skillId)
+
+    const beforeRollback = await app.inject({
+      method: 'GET',
+      url: '/api/v1/skills/sync?cursor=0',
+      headers: bearer(bobToken)
+    })
+    expect(beforeRollback.json().data.upserts[0].version).toBe('2.0.0')
+
+    const rolledBack = await app.inject({
+      method: 'POST',
+      url: `/api/v1/admin/skills/${skillId}/rollback`,
+      headers: bearer(adminToken),
+      payload: { note: '版本 2 验收失败' }
+    })
+    expect(rolledBack.statusCode).toBe(200)
+    expect(rolledBack.json().data.version).toBe('1.0.0')
+
+    const afterRollback = await app.inject({
+      method: 'GET',
+      url: '/api/v1/skills/sync?cursor=0',
+      headers: bearer(bobToken)
+    })
+    const item = afterRollback.json().data.upserts[0]
+    expect(item.version).toBe('1.0.0')
+    expect(
+      verifyServerPayload(
+        (await app.inject({
+          method: 'GET', url: '/api/v1/client/bootstrap', headers: bearer(bobToken)
+        })).json().data.signingPublicKey,
+        item.signaturePayload,
+        item.signature
+      )
+    ).toBe(true)
+
+    const disabled = await app.inject({
+      method: 'POST',
+      url: `/api/v1/admin/skills/${skillId}/disable`,
+      headers: bearer(adminToken),
+      payload: { note: '安全应急禁用' }
+    })
+    expect(disabled.statusCode).toBe(200)
+    const afterDisable = await app.inject({
+      method: 'GET',
+      url: '/api/v1/skills/sync?cursor=0',
+      headers: bearer(bobToken)
+    })
+    expect(afterDisable.json().data.visibleSkillIds).not.toContain(skillId)
+    const packageAfterDisable = await app.inject({
+      method: 'GET',
+      url: item.packageUrl,
+      headers: bearer(bobToken)
+    })
+    expect(packageAfterDisable.statusCode).toBe(404)
   })
 
   it('用户被移出团队后，同步的权威清单立即移除该团队 Skill', async () => {

@@ -17,6 +17,12 @@ services:
       ECHO_JWT_SECRET_FILE: /run/secrets/echo_jwt_secret
       ECHO_MASTER_KEY_FILE: /run/secrets/echo_master_key
       ECHO_ADMIN_PASSWORD_FILE: /run/secrets/echo_admin_password
+      ECHO_ANTIVIRUS_HOST: clamav
+      ECHO_ANTIVIRUS_PORT: 3310
+      ECHO_ANTIVIRUS_REQUIRED: "true"
+    depends_on:
+      clamav:
+        condition: service_healthy
     secrets:
       - echo_jwt_secret
       - echo_master_key
@@ -27,7 +33,7 @@ services:
     expose:
       - "8787"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/v1/health').then(async r=>{const j=await r.json();process.exit(r.ok&&j.models?.productionReady?0:1)}).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 3s
       start_period: 30s
@@ -39,6 +45,24 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777
+    networks:
+      - echo_internal
+
+  clamav:
+    image: clamav/clamav:1.4
+    restart: unless-stopped
+    volumes:
+      - clamav_data:/var/lib/clamav
+    expose:
+      - "3310"
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping", "1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
     networks:
       - echo_internal
 
@@ -73,6 +97,7 @@ secrets:
 
 volumes:
   echo_data:
+  clamav_data:
   caddy_data:
   caddy_config:
 

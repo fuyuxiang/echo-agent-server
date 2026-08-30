@@ -10,8 +10,8 @@
 {"id":"q010","kind":"fact","question":"VPN 申请流程是怎样的","expected_doc_ids":["d_it_vpn"],"expected_answer_points":["IT","工单","1工作日"],"as_user":"u_member_1"}
 {"id":"q011","kind":"fact","question":"公司有哪些假期类型","expected_doc_ids":["d_holiday_v2"],"expected_answer_points":["年假","病假","事假"],"as_user":"u_member_1"}
 {"id":"q012","kind":"fact","question":"工资发放日是哪天","expected_doc_ids":["d_payroll"],"expected_answer_points":["每月15","节假日顺延"],"as_user":"u_member_1"}
-{"id":"q013","kind":"fact","question":"绩效评估周期是多久","expected_doc_ids":["d_perf_v3"],"expected_answer_points":"季度","as_user":"u_member_1"}
-{"id":"q014","kind":"fact","question":"离职需要提前多久通知","expected_doc_ids":["d_employment"],"expected_answer_points":"30天","as_user":"u_member_1"}
+{"id":"q013","kind":"fact","question":"绩效评估周期是多久","expected_doc_ids":["d_perf_v3"],"expected_answer_points":["季度"],"as_user":"u_member_1"}
+{"id":"q014","kind":"fact","question":"离职需要提前多久通知","expected_doc_ids":["d_employment"],"expected_answer_points":["30天"],"as_user":"u_member_1"}
 {"id":"q015","kind":"fact","question":"员工培训有哪些必修课程","expected_doc_ids":["d_training"],"expected_answer_points":["安全","合规","反骚扰"],"as_user":"u_member_1"}
 {"id":"q016","kind":"fact","question":"会议室预订系统地址是什么","expected_doc_ids":["d_meeting"],"expected_answer_points":["oa.example.com"],"as_user":"u_member_1"}
 {"id":"q017","kind":"fact","question":"出差机票由谁预订","expected_doc_ids":["d_travel_v3"],"expected_answer_points":["差旅平台","自行"],"as_user":"u_member_1"}

@@ -187,14 +187,16 @@ export class Retriever {
             }))
           )
 
-    const pool = capPerDocument(merged, MAX_CHUNKS_PER_DOC).slice(0, RERANK_POOL)
+    // 先精排再做文档多样性。若在精排前按 BM25/RRF 名次截同文档，标题块
+    // 很容易挤掉真正包含金额/步骤的正文块，导致“找到了文档却没有证据”。
+    const pool = merged.slice(0, RERANK_POOL)
 
     // 精排
     const rerankT0 = Date.now()
     const ranked = await rerankSafely(
       this.deps.reranker,
       req.query,
-      pool.map((c) => ({ id: c.chunkId, text: c.text })),
+      pool.map((c) => ({ id: c.chunkId, text: this.relevanceText(c) })),
       undefined,
       (e) => this.deps.log?.warn(`rerank 降级: ${String(e)}`)
     )
@@ -208,10 +210,16 @@ export class Retriever {
     // 过滤明显不相关的候选。精排跳过时用词汇重叠兜底打分,因为 RRF 分数
     // 是名次倒数之和,与"有多相关"无关 —— 库里最不相关的文档也能拿到
     // 1/(60+1) 的高名次分。
-    const relevant = this.filterByRelevance(ordered, req.query, rerankSkipped)
+    const relevant = this.filterByRelevance(
+      ordered,
+      req.query,
+      rerankSkipped,
+      req.multiHop === true
+    )
 
+    const diverse = capPerDocument(relevant, MAX_CHUNKS_PER_DOC)
     const chunks = this.assemble(
-      relevant.slice(0, limit),
+      diverse.slice(0, limit),
       req.tokenBudget ?? DEFAULT_TOKEN_BUDGET
     )
     const memories = searchMemories(this.deps.db, req.query, ctx, 5)
@@ -277,21 +285,45 @@ export class Retriever {
   /**
    * 剔除不相关候选,让"没找到"成为可能的答案。
    *
-   * BM25 命中过的 chunk 一律保留:它至少共享了查询里的词,而 BM25 的
-   * 精确匹配正是型号、缩写这类查询的主力,不该被语义分数否掉。
+   * BM25 只是召回信号，不是证据充分性证明。所有候选（包括
+   * BM25 命中）都必须过精排或可解释的词汇重叠阈值。
    */
   private filterByRelevance(
     items: (FusedCandidate & { rerankScore?: number })[],
     query: string,
-    rerankSkipped: boolean
+    rerankSkipped: boolean,
+    multiHop: boolean
   ): (FusedCandidate & { rerankScore?: number })[] {
-    return items.filter((c) => {
-      if (c.sources.includes('bm25')) return true
-      const score = rerankSkipped
-        ? lexicalOverlapScore(query, c.text)
-        : (c.rerankScore ?? 0)
-      return score >= MIN_RELEVANCE
-    })
+    const scored = items.map((candidate) => ({
+      candidate,
+      score: rerankSkipped
+        ? lexicalOverlapScore(query, this.relevanceText(candidate))
+        : (candidate.rerankScore ?? 0)
+    }))
+    // 开发/降级词汇精排没有语义能力，低到 0.08 的偶然二字重合会把
+    // “月球基地班车”错误关联到“班车安排”。单主题必须覆盖近半查询，
+    // 并保留接近 top 分的候选；显式多跳允许各文档只覆盖一个子问题。
+    const lexicalMode = rerankSkipped || !this.deps.reranker.crossEncoder
+    if (!lexicalMode) {
+      return scored
+        .filter(({ score }) => score >= MIN_RELEVANCE)
+        .map(({ candidate }) => candidate)
+    }
+    const absolute = multiHop ? 0.18 : 0.45
+    const top = scored[0]?.score ?? 0
+    const relative = multiHop ? absolute : Math.max(absolute, top * 0.75)
+    const anchorDocs = new Set(
+      scored
+        .filter(({ score }) => score >= relative)
+        .map(({ candidate }) => candidate.docId)
+    )
+    return scored
+      .filter(({ score, candidate }) => score >= relative || anchorDocs.has(candidate.docId))
+      .map(({ candidate }) => candidate)
+  }
+
+  private relevanceText(candidate: Candidate): string {
+    return `${candidate.docTitle}\n${candidate.heading ?? ''}\n${candidate.text}`
   }
 
   private assemble(
@@ -339,29 +371,61 @@ export class Retriever {
 
   /** 按主题词找文档 owner。没有命中文档时也能给出方向。 */
   private suggestAsk(query: string, ctx: AccessContext): SuggestedPerson[] {
-    const placeholders = ctx.scopeIds.map(() => '?').join(',')
-    const rows = this.deps.db
-      .prepare(
-        `SELECT DISTINCT u.id AS userId, u.display_name AS displayName, COUNT(*) AS n
-           FROM documents d
-           LEFT JOIN document_families df ON df.id = d.family_id
-           JOIN users u ON u.id = d.owner_id
-          WHERE d.scope_id IN (${placeholders})
-            AND d.status = 'ready'
-            AND (d.family_id IS NULL OR
-                 (df.current_document_id = d.id AND df.state = 'active'))
-            AND d.sensitivity <= ?
-            AND u.status = 'active'
-          GROUP BY u.id
-          ORDER BY n DESC
-          LIMIT 3`
-      )
-      .all(...ctx.scopeIds, ctx.clearance) as { userId: string; displayName: string }[]
-
-    return rows.map((r) => ({
-      ...r,
-      reason: '该范围内文档的维护者'
-    }))
+    const topicHits = bm25Search(this.deps.db, query, ctx, 30)
+    const owners = new Map<string, { userId: string; displayName: string; titles: Set<string>; hits: number }>()
+    for (const hit of topicHits) {
+      if (!hit.ownerId || !hit.ownerName) continue
+      const current = owners.get(hit.ownerId) ?? {
+        userId: hit.ownerId,
+        displayName: hit.ownerName,
+        titles: new Set<string>(),
+        hits: 0
+      }
+      current.hits += 1
+      current.titles.add(hit.docTitle)
+      owners.set(hit.ownerId, current)
+    }
+    // 新主题可能尚未入库，严格主题检索此时没有 owner。退回到用户有权
+    // 看到的最近知识维护人，而不是返回空白或跨权限猜联系人。
+    if (owners.size === 0 && ctx.scopeIds.length > 0) {
+      const placeholders = ctx.scopeIds.map(() => '?').join(',')
+      const rows = this.deps.db.prepare(`
+        SELECT d.owner_id AS ownerId, u.display_name AS ownerName,
+               d.title AS docTitle
+          FROM documents d
+          JOIN users u ON u.id = d.owner_id AND u.status = 'active'
+         WHERE d.scope_id IN (${placeholders})
+           AND d.sensitivity <= ?
+           AND d.status = 'ready'
+         ORDER BY d.updated_at DESC
+         LIMIT 30
+      `).all(...ctx.scopeIds, ctx.clearance) as Array<{
+        ownerId: string
+        ownerName: string
+        docTitle: string
+      }>
+      for (const row of rows) {
+        const current = owners.get(row.ownerId) ?? {
+          userId: row.ownerId,
+          displayName: row.ownerName,
+          titles: new Set<string>(),
+          hits: 0
+        }
+        current.hits += 1
+        current.titles.add(row.docTitle)
+        owners.set(row.ownerId, current)
+      }
+    }
+    return [...owners.values()]
+      .sort((a, b) => b.hits - a.hits)
+      .slice(0, 3)
+      .map((owner) => ({
+        userId: owner.userId,
+        displayName: owner.displayName,
+        reason: topicHits.length > 0
+          ? `维护与问题主题相关的文档：${[...owner.titles].slice(0, 2).join('、')}`
+          : `可咨询的知识维护人，最近维护：${[...owner.titles].slice(0, 2).join('、')}`
+      }))
   }
 
   private empty(t0: number): RetrieveResponse {

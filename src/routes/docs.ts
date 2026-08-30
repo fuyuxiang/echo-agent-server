@@ -8,6 +8,7 @@ import { enqueueIngest } from '../kb/ingest/worker.js'
 import { deleteChunks } from '../kb/ingest/indexer.js'
 import { sourceTypeFromName, SUPPORTED_EXTENSIONS } from '../kb/ingest/parse.js'
 import { archiveFamilyIfCurrent, createDocumentFamily } from '../dao/documents.js'
+import { scanDocument } from '../security/content-scanner.js'
 
 const ListQuery = z.object({
   scopeId: z.string().optional(),
@@ -83,7 +84,17 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       }
 
       const ext = fileName.slice(fileName.lastIndexOf('.') + 1)
-      const storageKey = await storage.put(buf, ext)
+      const quarantineKey = await storage.put(buf, ext, 'quarantine/documents')
+      const scanReport = await scanDocument(buf, sourceType, cfg)
+      if (scanReport.status !== 'passed') {
+        app.audit(req, 'document_scan_failed', undefined, {
+          scopeId,
+          findingCodes: scanReport.findings.map((item) => item.code)
+        })
+        await storage.delete(quarantineKey)
+        return reply.code(422).send(fail(4221, '文档技术扫描未通过'))
+      }
+      const storageKey = await storage.move(quarantineKey, 'published/documents')
       const docId = randomUUID()
       const now = Date.now()
       const title = fields.title?.value?.trim() || fileName
@@ -581,21 +592,18 @@ export function registerDocsRoutes(app: FastifyInstance): void {
    */
   app.post(
     '/api/v1/docs/:id/new-version',
-    { preHandler: [app.authenticate, requireCurator] },
+    { preHandler: app.authenticate },
     async (req, reply) => {
       const oldId = (req.params as { id: string }).id
       const claims = (req as AuthedRequest).claims
       const ctx = loadAccessContext(db, claims.sub)
-      if (claims.role !== 'admin' && !canAccessDocument(db, ctx, oldId)) {
-        return reply.code(404).send(fail(4041, '原文档不存在或无权访问'))
-      }
-
       const old = db
         .prepare(
           `SELECT scope_id AS scopeId, sensitivity, sensitivity AS sens,
                   owner_id AS ownerId, version, source_type AS sourceType, title,
-                  family_id AS familyId
-             FROM documents WHERE id = ?`
+                  family_id AS familyId, s.kind AS scopeKind
+             FROM documents d JOIN v_effective_scopes s ON s.id=d.scope_id
+            WHERE d.id = ?`
         )
         .get(oldId) as
         | {
@@ -606,9 +614,14 @@ export function registerDocsRoutes(app: FastifyInstance): void {
             sourceType: string
             title: string
             familyId: string | null
+            scopeKind: string
           }
         | undefined
       if (!old) return reply.code(404).send(fail(4041, '原文档不存在'))
+      const mayManage = claims.role === 'admin' ||
+        (claims.role === 'curator' && canAccessDocument(db, ctx, oldId)) ||
+        (old.scopeKind === 'personal' && old.ownerId === claims.sub && canAccessDocument(db, ctx, oldId))
+      if (!mayManage) return reply.code(404).send(fail(4041, '原文档不存在或无权访问'))
 
       const data = await req.file({ limits: { fileSize: cfg.maxUploadBytes } })
       if (!data) return reply.code(400).send(fail(4001, '缺少文件'))
@@ -628,7 +641,17 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       }
       const hash = createHash('sha256').update(buf).digest('hex')
       const ext = fileName.slice(fileName.lastIndexOf('.') + 1)
-      const storageKey = await storage.put(buf, ext)
+      const quarantineKey = await storage.put(buf, ext, 'quarantine/documents')
+      const scanReport = await scanDocument(buf, old.sourceType, cfg)
+      if (scanReport.status !== 'passed') {
+        app.audit(req, 'document_scan_failed', oldId, {
+          kind: 'new_version',
+          findingCodes: scanReport.findings.map((item) => item.code)
+        })
+        await storage.delete(quarantineKey)
+        return reply.code(422).send(fail(4221, '新版本技术扫描未通过'))
+      }
+      const storageKey = await storage.move(quarantineKey, 'published/documents')
       const newDocId = randomUUID()
       const now = Date.now()
       const title =
@@ -697,12 +720,20 @@ export function registerDocsRoutes(app: FastifyInstance): void {
    */
   app.delete(
     '/api/v1/docs/:id',
-    { preHandler: [app.authenticate, requireCurator] },
+    { preHandler: app.authenticate },
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
       const ctx = loadAccessContext(db, claims.sub)
-      if (claims.role !== 'admin' && !canAccessDocument(db, ctx, id)) {
+      const row = db.prepare(
+        `SELECT d.owner_id AS ownerId, s.kind AS scopeKind
+           FROM documents d JOIN v_effective_scopes s ON s.id=d.scope_id
+          WHERE d.id=?`
+      ).get(id) as { ownerId: string | null; scopeKind: string } | undefined
+      const mayManage = claims.role === 'admin' ||
+        (claims.role === 'curator' && canAccessDocument(db, ctx, id)) ||
+        (row?.scopeKind === 'personal' && row.ownerId === claims.sub && canAccessDocument(db, ctx, id))
+      if (!mayManage) {
         return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
       }
 

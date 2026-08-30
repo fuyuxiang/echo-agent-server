@@ -72,7 +72,7 @@ class RemoteReranker implements Reranker {
  * 就得换 base 版或改远端。
  */
 export function lexicalOverlapScore(query: string, text: string): number {
-  const q = new Set(gram2(query))
+  const q = new Set(questionGrams(query))
   if (q.size === 0) return 0
   const t = new Set(gram2(text))
   let hit = 0
@@ -80,8 +80,34 @@ export function lexicalOverlapScore(query: string, text: string): number {
   return hit / q.size
 }
 
+// 这些词描述“怎么问”，不是“问什么”。若把它们计入覆盖率，
+// “报销需要几级审批”即使命中“报销审批”也只有很低分；反过来，
+// “月球基地的班车安排”又会因“安排”偶然命中。只在 query 侧移除，
+// 文档侧仍保留完整文本供证据匹配。
+const QUESTION_NOISE = [
+  '最少几位', '是多少', '是怎样的', '是什么时候',
+  '是哪个部门', '有哪些', '怎么处理', '提前多久', '多少金额',
+  '才能开始', '能不能', '到几点', '年龄分组', '一次几本',
+  '多久一次', '怎么办', '如何', '怎样', '怎么', '哪些', '什么',
+  '多少', '多久', '几天', '几级', '几位', '多长', '由谁', '谁来',
+  '何处', '哪里', '能否', '是否', '可以', '需要', '一共', '请问',
+  '关于', '公司', '一下', '是哪天', '类型', '比例', '流程', '政策',
+  '规则', '安排'
+]
+
+function questionGrams(value: string): string[] {
+  let normalized = value
+    .toLowerCase()
+    .replaceAll('薪资', '薪酬')
+    .replaceAll('股票激励', '持股')
+    .replaceAll('上限', '限额')
+  for (const noise of QUESTION_NOISE) normalized = normalized.replaceAll(noise, '')
+  const cleaned = gram2(normalized)
+  return cleaned.length > 0 ? cleaned : gram2(value)
+}
+
 function gram2(s: string): string[] {
-  const norm = s.toLowerCase().replace(/\s+/g, '')
+  const norm = s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
   const out: string[] = []
   for (let i = 0; i < norm.length - 1; i++) out.push(norm.slice(i, i + 2))
   return out

@@ -13,8 +13,11 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { openDb } from '../src/db/index.js'
 import { FIXTURE_DOCS, type FixtureDoc } from './fixture-data.js'
+import { indexableText } from '../src/kb/retrieve/text.js'
 
 interface FixtureMeta {
   docId: string
@@ -100,18 +103,17 @@ async function fixtureIntoDb(dbPath: string): Promise<void> {
     }
 
     // 删除旧 chunks / fts / meta / vector 行,确保 fixture 重跑一致。
-    // 注意 chunks_fts 是 contentless 虚表,DELETE 在虚表上无效。
-    // 这里用先清 chunks,再靠 ON DELETE CASCADE 不会触发(没建),所以
-    // 显式按 rowid 清 FTS 行;但 rowid 需要先查出来,这里直接清全部旧 chunks
-    // 留下的 fts 行,然后重建 —— 由 embedding_meta 的 fts_rowid 同步。
-    db.prepare('DELETE FROM chunks WHERE doc_id = ?').run(id)
-    // 显式清掉此 doc 已有的 fts 行:用嵌入表反查。
+    // chunks_fts 是 contentless 虚表，必须在删 chunks 前保存 rowid，
+    // 再用 FTS5 的 delete 命令显式清理。
+    // 先保存 FTS rowid，再删 chunks。如果先删 chunks，下面的子查询
+    // 将永返回空集，fixture 重跑会残留幽灵索引项。
     const oldFtsRows = db
       .prepare(
         `SELECT fts_rowid FROM embedding_meta
           WHERE chunk_id IN (SELECT id FROM chunks WHERE doc_id = ?)`
       )
       .all(id) as { fts_rowid: number }[]
+    db.prepare('DELETE FROM chunks WHERE doc_id = ?').run(id)
     for (const r of oldFtsRows) {
       db.prepare('INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES (?,?,?)').run(
         'delete',
@@ -120,25 +122,54 @@ async function fixtureIntoDb(dbPath: string): Promise<void> {
       )
     }
 
-    const paragraphs = doc.body
-      .split(/\n\s*\n/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
+    // 与生产 Markdown 摄取对齐：标题不单独成 chunk，而是作为后续
+    // 正文的 heading 元数据参与检索和引用。
+    const paragraphs: Array<{ text: string; heading: string }> = []
+    const headingStack: Array<{ level: number; text: string }> = []
+    for (const rawParagraph of doc.body.split(/\n\s*\n/)) {
+      const bodyLines: string[] = []
+      for (const line of rawParagraph.trim().split('\n')) {
+        const match = /^(#{1,6})[ \t]+(.+)$/.exec(line.trim())
+        if (match) {
+          const level = match[1].length
+          while (headingStack.length > 0 && headingStack[headingStack.length - 1].level >= level) {
+            headingStack.pop()
+          }
+          headingStack.push({ level, text: match[2].trim() })
+        } else if (line.trim().length > 0) {
+          bodyLines.push(line.trim())
+        }
+      }
+      const text = bodyLines.join('\n').trim()
+      if (text.length > 0) {
+        paragraphs.push({ text, heading: headingStack.map((h) => h.text).join(' > ') })
+      }
+    }
 
-    paragraphs.forEach((text, idx) => {
+    paragraphs.forEach(({ text, heading }, idx) => {
       const chunkId = `${id}-c${idx}`
       // chunk 自身
       const ins = db
         .prepare(
           `INSERT INTO chunks
-             (id, doc_id, scope_id, sensitivity, seq, text, token_count, modality, created_at)
-           VALUES (?,?,?,0,?,?,?,?,?)`
+             (id, doc_id, scope_id, sensitivity, seq, text, token_count, heading, modality, created_at)
+           VALUES (?,?,?,0,?,?,?,?,?,?)`
         )
-        .run(chunkId, id, scopeId, idx, text, Math.max(1, Math.ceil(text.length / 4)), 'text', Date.now())
+        .run(
+          chunkId,
+          id,
+          scopeId,
+          idx,
+          text,
+          Math.max(1, Math.ceil(text.length / 4)),
+          heading,
+          'text',
+          Date.now()
+        )
       const rowid = Number(ins.lastInsertRowid)
 
       // FTS5 contentless:仅由 rowid 关联
-      db.prepare('INSERT INTO chunks_fts(rowid, text) VALUES (?,?)').run(rowid, text)
+      db.prepare('INSERT INTO chunks_fts(rowid, text) VALUES (?,?)').run(rowid, indexableText(text))
 
       // embedding_meta:让 retriever 知道该 chunk 属于哪个 model_version。
       db.prepare(
@@ -185,9 +216,13 @@ async function main(): Promise<void> {
   await fixtureIntoDb(dbPath)
 }
 
-main().catch((e) => {
-  console.error('[fixture] 失败:', e)
-  process.exit(1)
-})
+// 仅作为 CLI 执行时灌库。被 Vitest/其他模块导入时不应产生
+// 隐式数据库写入或 process.exit 副作用。
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  main().catch((e) => {
+    console.error('[fixture] 失败:', e)
+    process.exit(1)
+  })
+}
 
 export { fixtureIntoDb }

@@ -16,6 +16,7 @@ import type {
   AuditLog,
   DocumentSubmission,
   SkillSubmission,
+  EnterprisePolicy,
 } from '../types'
 
 // 所有路径都带 /api/v1 前缀。旧版无前缀的路径已不存在 —— 上一版前端调用
@@ -165,6 +166,19 @@ export const rejectSkillSubmission = (id: string, note: string): Promise<unknown
 
 export const downloadSkillSubmission = (id: string): Promise<Blob> =>
   client.get(`/api/v1/admin/skill-submissions/${id}/package`, { responseType: 'blob' })
+
+export const disableSkill = (id: string, note: string): Promise<unknown> =>
+  client.post(`/api/v1/admin/skills/${id}/disable`, { note })
+
+export const rollbackSkill = (id: string, versionId: string): Promise<unknown> =>
+  client.post(`/api/v1/admin/skills/${id}/rollback`, { versionId })
+
+export const getEnterprisePolicy = (): Promise<EnterprisePolicy> =>
+  client.get('/api/v1/admin/enterprise-policy')
+
+export const updateEnterprisePolicy = (
+  policy: Omit<EnterprisePolicy, 'version' | 'updatedAt'>,
+): Promise<EnterprisePolicy> => client.put('/api/v1/admin/enterprise-policy', policy)
 
 // ── 组织记忆 ──────────────────────────────────────────────────────────────
 export const listMemories = (params: {

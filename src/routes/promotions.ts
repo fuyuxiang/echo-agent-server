@@ -6,6 +6,7 @@ import { requireCurator, type AuthedRequest } from '../auth/jwt.js'
 import { loadAccessContext, canAccessScope } from '../auth/scopes.js'
 import { enqueueIngest } from '../kb/ingest/worker.js'
 import { createDocumentFamily } from '../dao/documents.js'
+import { scanDocument } from '../security/content-scanner.js'
 
 /**
  * 知识提升。
@@ -56,7 +57,7 @@ const ReviewSchema = z.object({
 })
 
 export function registerPromotionRoutes(app: FastifyInstance): void {
-  const { db, storage } = app.deps
+  const { db, storage, cfg } = app.deps
 
   app.post('/api/v1/promotions', { preHandler: app.authenticate }, async (req, reply) => {
     const parsed = CreateSchema.safeParse(req.body ?? {})
@@ -234,7 +235,11 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
         const v = merged.data as z.infer<typeof DocumentPayload>
         const buf = Buffer.from(v.text, 'utf8')
         const hash = createHash('sha256').update(buf).digest('hex')
-        const storageKey = await storage.put(buf, 'md')
+        const report = await scanDocument(buf, v.sourceType, cfg)
+        if (report.status !== 'passed') {
+          return reply.code(422).send(fail(4221, '文档技术扫描未通过'))
+        }
+        const storageKey = await storage.put(buf, 'md', 'published/documents')
         resultId = randomUUID()
         const now = Date.now()
         const familyId = createDocumentFamily(db, {

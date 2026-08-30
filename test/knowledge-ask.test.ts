@@ -11,6 +11,7 @@ import { drain } from '../src/kb/ingest/worker.js'
 import { createEmbedder } from '../src/models/embedder.js'
 import { ensureOrgScope } from '../src/server.js'
 import type { Retriever } from '../src/kb/retrieve/index.js'
+import { verifyServerPayload } from '../src/server-signing.js'
 
 let db: DB
 let app: FastifyInstance
@@ -95,6 +96,54 @@ describe('桌面端启动与 Agentic RAG', () => {
     expect(data.policy.allowPersonalCloud).toBe(true)
     expect(data.policySignature).toMatch(/^[A-Za-z0-9_-]+$/)
     expect(data.endpoints.ask).toBe('/api/v1/knowledge/ask')
+  })
+
+  it('企业策略只能由管理员更新，新版本签名会在 bootstrap 立即生效', async () => {
+    const denied = await app.inject({
+      method: 'GET',
+      url: '/api/v1/admin/enterprise-policy',
+      headers: bearer(aliceToken)
+    })
+    expect(denied.statusCode).toBe(403)
+
+    const before = await app.inject({
+      method: 'GET',
+      url: '/api/v1/admin/enterprise-policy',
+      headers: bearer(adminToken)
+    })
+    const previousVersion = before.json().data.version
+    const updated = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/admin/enterprise-policy',
+      headers: bearer(adminToken),
+      payload: {
+        allowLocalKnowledge: false,
+        allowPersonalCloud: false,
+        allowSkillSubmission: false,
+        offlineEnterpriseContent: false,
+        managedSkillLeaseHours: 6
+      }
+    })
+    expect(updated.statusCode).toBe(200)
+    expect(updated.json().data.version).toBe(previousVersion + 1)
+
+    const bootstrap = await app.inject({
+      method: 'GET',
+      url: '/api/v1/client/bootstrap',
+      headers: bearer(aliceToken)
+    })
+    const data = bootstrap.json().data
+    expect(data.policy).toMatchObject({
+      version: previousVersion + 1,
+      allowLocalKnowledge: false,
+      allowPersonalCloud: false,
+      allowSkillSubmission: false,
+      offlineEnterpriseContent: false,
+      managedSkillLeaseHours: 6
+    })
+    expect(
+      verifyServerPayload(data.signingPublicKey, data.policyPayload, data.policySignature)
+    ).toBe(true)
   })
 
   it('有证据时返回 SSE 结构化引用，没配大模型仍有可用的抽取式降级', async () => {

@@ -11,6 +11,7 @@ import Groups from './pages/Groups'
 import ModelConfig from './pages/ModelConfig'
 import Quality from './pages/Quality'
 import Audit from './pages/Audit'
+import EnterprisePolicy from './pages/EnterprisePolicy'
 
 export default function App() {
   return (
@@ -33,6 +34,7 @@ export default function App() {
               <Route path="/groups" element={<Groups />} />
               <Route path="/model-config" element={<ModelConfig />} />
               <Route path="/audit" element={<Audit />} />
+              <Route path="/enterprise-policy" element={<EnterprisePolicy />} />
             </Route>
             <Route path="/" element={<Navigate to="/documents" replace />} />
           </Route>

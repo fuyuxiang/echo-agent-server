@@ -180,4 +180,103 @@ describe('文档个人/组织发布流', () => {
     expect(after.json().data.chunks.length).toBeGreaterThan(0)
     expect(after.json().data.chunks[0].docTitle).toBe('客户响应规范')
   })
+
+  it('个人文档可以发布副本到组织，审核前后的可见性立即切换', async () => {
+    const { db, app, orgScope, aliceId } = await setup()
+    const aliceToken = await login(app, 'alice', 'alice-password')
+    const adminToken = await login(app, 'admin', 'admin-password')
+    const bobToken = await login(app, 'bob', 'bob-password')
+    const personal = await submit(
+      app,
+      aliceToken,
+      `personal-${aliceId}`,
+      '# 个人经验\n\n蓝海客户的紧急响应口令为珊瑚七号。'
+    )
+    await drain({ db, cfg, embedder: createEmbedder(cfg) })
+    const sourceDocId = personal.json().data.docId
+
+    const published = await app.inject({
+      method: 'POST',
+      url: `/api/v1/docs/${sourceDocId}/publish`,
+      headers: bearer(aliceToken),
+      payload: { targetScopeId: orgScope, title: '蓝海客户应急手册' }
+    })
+    expect(published.statusCode).toBe(200)
+    expect(published.json().data.state).toBe('pending')
+
+    const before = await app.inject({
+      method: 'POST',
+      url: '/api/v1/retrieve',
+      headers: bearer(bobToken),
+      payload: { query: '珊瑚七号' }
+    })
+    expect(before.json().data.chunks).toHaveLength(0)
+
+    const approved = await app.inject({
+      method: 'POST',
+      url: `/api/v1/document-submissions/${published.json().data.submissionId}/approve`,
+      headers: bearer(adminToken),
+      payload: { note: '可发布' }
+    })
+    expect(approved.statusCode).toBe(200)
+    await drain({ db, cfg, embedder: createEmbedder(cfg) })
+
+    const after = await app.inject({
+      method: 'POST',
+      url: '/api/v1/retrieve',
+      headers: bearer(bobToken),
+      payload: { query: '珊瑚七号' }
+    })
+    expect(after.json().data.chunks.some((chunk: { docTitle: string }) =>
+      chunk.docTitle === '蓝海客户应急手册')).toBe(true)
+  })
+
+  it('个人文档所有者可上传新版本并归档，归档后新内容立即退出检索', async () => {
+    const { db, app, aliceId } = await setup()
+    const aliceToken = await login(app, 'alice', 'alice-password')
+    const personal = await submit(
+      app,
+      aliceToken,
+      `personal-${aliceId}`,
+      '# 客户备忘\n\n初版响应代号为星云一号。'
+    )
+    await drain({ db, cfg, embedder: createEmbedder(cfg) })
+
+    const versionBody = multipartBody(
+      { title: '客户备忘 v2' },
+      { name: 'service.md', content: '# 客户备忘\n\n新版响应代号为星云二号。' }
+    )
+    const version = await app.inject({
+      method: 'POST',
+      url: `/api/v1/docs/${personal.json().data.docId}/new-version`,
+      headers: { ...bearer(aliceToken), ...versionBody.headers },
+      payload: versionBody.payload
+    })
+    expect(version.statusCode).toBe(200)
+    expect(version.json().data.version).toBe(2)
+    await drain({ db, cfg, embedder: createEmbedder(cfg) })
+
+    const beforeArchive = await app.inject({
+      method: 'POST',
+      url: '/api/v1/retrieve',
+      headers: bearer(aliceToken),
+      payload: { query: '星云二号' }
+    })
+    expect(beforeArchive.json().data.chunks.length).toBeGreaterThan(0)
+
+    const archived = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/docs/${version.json().data.docId}`,
+      headers: bearer(aliceToken)
+    })
+    expect(archived.statusCode).toBe(200)
+    expect(archived.json().data.archived).toBe(true)
+    const afterArchive = await app.inject({
+      method: 'POST',
+      url: '/api/v1/retrieve',
+      headers: bearer(aliceToken),
+      payload: { query: '星云二号' }
+    })
+    expect(afterArchive.json().data.chunks).toHaveLength(0)
+  })
 })

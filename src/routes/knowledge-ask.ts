@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { AuthedRequest } from '../auth/jwt.js'
 import { decryptSecret, deriveKey } from '../crypto.js'
-import type { RetrievedChunk } from '../kb/retrieve/index.js'
+import type { RetrievedChunk, RetrieveResponse } from '../kb/retrieve/index.js'
 import { lexicalOverlapScore } from '../models/reranker.js'
 import { fail } from '../reply.js'
 
@@ -46,6 +46,7 @@ interface AskFinal {
   insufficient: boolean
   suggestedPeople: unknown[]
   traceId: string
+  qaEventId?: string
   mode: 'fast' | 'deep'
   verification: 'supported' | 'extractive_fallback' | 'insufficient' | 'stale_only'
 }
@@ -82,6 +83,61 @@ function citationsFrom(chunks: RetrievedChunk[]): AskCitation[] {
     openUrl: chunk.citation.openUrl,
     stale: chunk.stale
   }))
+}
+
+interface EvidenceAssessment {
+  sufficient: boolean
+  confidence: number
+  reason: 'none' | 'stale_only' | 'low_relevance' | 'supported'
+}
+
+function assessEvidence(question: string, chunks: RetrievedChunk[]): EvidenceAssessment {
+  if (chunks.length === 0) return { sufficient: false, confidence: 0, reason: 'none' }
+  const fresh = chunks.filter((chunk) => !chunk.stale)
+  if (fresh.length === 0) return { sufficient: false, confidence: 0.2, reason: 'stale_only' }
+  const overlap = lexicalOverlapScore(question, fresh.slice(0, 6).map((chunk) => chunk.text).join('\n'))
+  const top = Math.max(...fresh.map((chunk) => chunk.score), 0)
+  // 同时要求问题覆盖和检索排序信号，不把“库里最近的一条”
+  // 错当成足够证据。远程 reranker 和本地词汇分数都是 0..1。
+  const score = Math.max(overlap, Math.min(1, top))
+  const sufficient = overlap >= 0.12 && top >= 0.08
+  return {
+    sufficient,
+    confidence: sufficient ? Math.min(0.9, 0.45 + score * 0.45) : Math.min(0.45, score),
+    reason: sufficient ? 'supported' : 'low_relevance'
+  }
+}
+
+function mergeRetrievals(results: RetrieveResponse[]): RetrieveResponse {
+  const chunks = new Map<string, RetrievedChunk>()
+  const memories = new Map<string, RetrieveResponse['memories'][number]>()
+  for (const result of results) {
+    for (const chunk of result.chunks) {
+      const prior = chunks.get(chunk.chunkId)
+      if (!prior || chunk.score > prior.score) chunks.set(chunk.chunkId, chunk)
+    }
+    for (const memory of result.memories) memories.set(memory.id, memory)
+  }
+  const last = results.at(-1)
+  return {
+    chunks: [...chunks.values()].sort((a, b) => b.score - a.score),
+    memories: [...memories.values()],
+    suggestAsk: results.flatMap((result) => result.suggestAsk ?? []).slice(0, 3),
+    diagnostics: last?.diagnostics ?? {
+      bm25Hits: 0, vecHits: 0, fusedCandidates: 0,
+      rerankMs: 0, rerankSkipped: false, totalMs: 0
+    }
+  }
+}
+
+function rewriteQuestion(question: string, chunks: RetrievedChunk[], round: number): string {
+  const anchors = [...new Set(chunks.flatMap((chunk) => [chunk.docTitle, chunk.citation.heading])
+    .map((value) => value.trim()).filter(Boolean))].slice(0, 3)
+  const normalized = question
+    .replace(/(?:请问|请帮我|能否|是多少|是什么|怎么样)[？?]?/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return `${normalized}${anchors.length ? ` ${anchors.join(' ')}` : ''} ${round === 1 ? '规定 标准' : '有效 最新'}`.trim()
 }
 
 function extractiveAnswer(citations: AskCitation[]): { answer: string; claims: AskClaim[] } {
@@ -128,7 +184,8 @@ async function generateGroundedAnswer(
   app: FastifyInstance,
   question: string,
   citations: AskCitation[],
-  externalSignal?: AbortSignal
+  externalSignal?: AbortSignal,
+  repair?: string
 ): Promise<string | null> {
   const { db, cfg } = app.deps
   const row = db.prepare(
@@ -175,7 +232,8 @@ async function generateGroundedAnswer(
             },
             {
               role: 'user',
-              content: `问题：${question}\n\n证据(JSON)：${JSON.stringify(evidence)}`
+              content: `问题：${question}\n\n证据(JSON)：${JSON.stringify(evidence)}` +
+                (repair ? `\n\n上次答案未通过引用校验，仅修复一次：${repair.slice(0, 4000)}` : '')
             }
           ]
         })
@@ -250,15 +308,32 @@ export function registerKnowledgeAskRoutes(app: FastifyInstance): void {
       const abortOnClose = () => clientAbort.abort()
       reply.raw.once('close', abortOnClose)
       try {
-        const retrieved = await retriever.retrieve(claims.sub, {
-          query: input.question,
-          limit: mode === 'deep' ? 12 : 8,
-          multiHop: mode === 'deep',
-          tokenBudget: mode === 'deep' ? 9000 : 6000,
-          scopes: input.scopeKinds,
-          scopeIds: input.scopeIds,
-          filters: input.filters
-        })
+        const retrievals: RetrieveResponse[] = []
+        const rounds = mode === 'deep' ? 2 : 1
+        let query = input.question
+        let assessment: EvidenceAssessment = { sufficient: false, confidence: 0, reason: 'none' }
+        for (let round = 0; round < rounds; round += 1) {
+          const result = await retriever.retrieve(claims.sub, {
+            query,
+            limit: mode === 'deep' ? 12 : 8,
+            multiHop: mode === 'deep',
+            tokenBudget: mode === 'deep' ? 9000 : 6000,
+            scopes: input.scopeKinds,
+            scopeIds: input.scopeIds,
+            filters: input.filters
+          })
+          retrievals.push(result)
+          const merged = mergeRetrievals(retrievals)
+          assessment = assessEvidence(input.question, merged.chunks)
+          if (assessment.sufficient || assessment.reason === 'stale_only' || round + 1 >= rounds) break
+          query = rewriteQuestion(input.question, merged.chunks, round + 1)
+          sse(reply.raw, 'status', {
+            stage: 'rewriting',
+            message: '首轮证据不足，正在改写问题并补充检索',
+            round: round + 2
+          })
+        }
+        const retrieved = mergeRetrievals(retrievals)
         if (clientAbort.signal.aborted) return reply
 
         const citations = citationsFrom(retrieved.chunks)
@@ -266,7 +341,7 @@ export function registerKnowledgeAskRoutes(app: FastifyInstance): void {
         for (const citation of citations) sse(reply.raw, 'citation', citation)
 
         let final: AskFinal
-        if (citations.length === 0) {
+        if (assessment.reason === 'none' || citations.length === 0) {
           final = {
             answer: '当前授权范围内没有找到足够支撑答案的证据。',
             claims: [],
@@ -278,7 +353,7 @@ export function registerKnowledgeAskRoutes(app: FastifyInstance): void {
             mode,
             verification: 'insufficient'
           }
-        } else if (citations.every((citation) => citation.stale)) {
+        } else if (assessment.reason === 'stale_only') {
           final = {
             answer: '只找到了可能已过期的易变资料，不能据此给出确定答案，请联系文档负责人确认。',
             claims: [],
@@ -290,6 +365,18 @@ export function registerKnowledgeAskRoutes(app: FastifyInstance): void {
             mode,
             verification: 'stale_only'
           }
+        } else if (!assessment.sufficient) {
+          final = {
+            answer: '找到了一些相关资料，但与问题的相关性和证据覆盖不足，不能给出可验证答案。',
+            claims: [],
+            citations,
+            confidence: assessment.confidence,
+            insufficient: true,
+            suggestedPeople: retrieved.suggestAsk ?? [],
+            traceId,
+            mode,
+            verification: 'insufficient'
+          }
         } else {
           sse(reply.raw, 'status', { stage: 'generating', message: '正在生成并校验有引用的答案' })
           const generated = await generateGroundedAnswer(
@@ -299,24 +386,55 @@ export function registerKnowledgeAskRoutes(app: FastifyInstance): void {
             clientAbort.signal
           )
           if (clientAbort.signal.aborted) return reply
-          const validation = generated && generated !== 'INSUFFICIENT'
-            ? validateGeneratedAnswer(generated, citations)
-            : { valid: false, claims: [] as AskClaim[] }
-          const grounded = validation.valid
-            ? { answer: generated!, claims: validation.claims }
-            : extractiveAnswer(citations.filter((citation) => !citation.stale))
-          final = {
-            ...grounded,
-            citations,
-            confidence: validation.valid ? 0.82 : 0.62,
-            insufficient: false,
-            suggestedPeople: [],
-            traceId,
-            mode,
-            verification: validation.valid ? 'supported' : 'extractive_fallback'
+          if (generated === 'INSUFFICIENT') {
+            final = {
+              answer: '模型判定当前证据无法支撑可验证答案。',
+              claims: [], citations, confidence: Math.min(assessment.confidence, 0.45),
+              insufficient: true, suggestedPeople: retrieved.suggestAsk ?? [],
+              traceId, mode, verification: 'insufficient'
+            }
+          } else if (generated) {
+            let answer = generated
+            let validation = validateGeneratedAnswer(answer, citations)
+            if (!validation.valid) {
+              sse(reply.raw, 'status', { stage: 'repairing', message: '引用校验未通过，正在修复一次' })
+              const repaired = await generateGroundedAnswer(
+                app, input.question, citations, clientAbort.signal, generated
+              )
+              if (clientAbort.signal.aborted) return reply
+              if (repaired && repaired !== 'INSUFFICIENT') {
+                const repairedValidation = validateGeneratedAnswer(repaired, citations)
+                if (repairedValidation.valid) {
+                  answer = repaired
+                  validation = repairedValidation
+                }
+              }
+            }
+            final = validation.valid
+              ? {
+                  answer, claims: validation.claims, citations,
+                  confidence: Math.max(0.7, assessment.confidence), insufficient: false,
+                  suggestedPeople: [], traceId, mode, verification: 'supported'
+                }
+              : {
+                  answer: '生成的答案未通过 claim-引用校验，已拒绝返回未受支撑的结论。',
+                  claims: [], citations, confidence: 0.25, insufficient: true,
+                  suggestedPeople: retrieved.suggestAsk ?? [], traceId, mode,
+                  verification: 'insufficient'
+                }
+          } else {
+            // 未配置/暂时无法使用生成模型时，只返回原文抽取；
+            // 这些 claim 与 quote 字面相同，因此不会引入新事实。
+            const grounded = extractiveAnswer(citations.filter((citation) => !citation.stale))
+            final = {
+              ...grounded, citations, confidence: assessment.confidence,
+              insufficient: false, suggestedPeople: [], traceId, mode,
+              verification: 'extractive_fallback'
+            }
           }
         }
 
+        final.qaEventId = qaId
         db.prepare(
           `INSERT INTO qa_events
              (id, user_id, question, answered, cited_chunks, top_score,

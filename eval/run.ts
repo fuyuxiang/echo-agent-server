@@ -69,6 +69,7 @@ interface CaseResult {
   relevance: 0 | 1 | null
   noAnswerCorrect: 0 | 1 | null
   leak: 0 | 1
+  hits?: Array<{ docId: string; score: number; text: string }>
   notes?: string
 }
 
@@ -187,12 +188,16 @@ async function bootstrapFixtureUsers(adminToken: string, rows: DatasetRow[]): Pr
   }
 }
 
-async function callRetrieve(token: string, query: string): Promise<{ res: RetrieveResponse; ms: number }> {
+async function callRetrieve(
+  token: string,
+  query: string,
+  multiHop: boolean
+): Promise<{ res: RetrieveResponse; ms: number }> {
   const t0 = Date.now()
   const res = await fetch(`${BASE_URL}/api/v1/retrieve`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
-    body: JSON.stringify({ query, limit: 8 })
+    body: JSON.stringify({ query, limit: 8, multi_hop: multiHop })
   })
   const ms = Date.now() - t0
   if (!res.ok) throw new Error(`retrieve ${res.status}: ${await res.text()}`)
@@ -204,10 +209,14 @@ async function callRetrieve(token: string, query: string): Promise<{ res: Retrie
 /** 基于引用的 faithfulness 近似:所有 answer points 都能在 chunk/memory text 中找到匹配。 */
 function fallbackFaithfulness(row: DatasetRow, res: RetrieveResponse): 0 | 1 {
   if (row.expected_answer_points.length === 0) return 1
-  const haystack = (res.chunks.map((c) => c.text).join(' ') + ' ' + res.memories.map((m) => m.content).join(' '))
+  const normalize = (value: string): string => value
     .toLowerCase()
+    .replace(/[^a-z0-9一-鿿]+/g, '')
+  const haystack = normalize(
+    res.chunks.map((c) => c.text).join(' ') + ' ' + res.memories.map((m) => m.content).join(' ')
+  )
   for (const p of row.expected_answer_points) {
-    if (!haystack.includes(p.toLowerCase())) return 0
+    if (!haystack.includes(normalize(p))) return 0
   }
   return 1
 }
@@ -291,7 +300,7 @@ async function run(): Promise<number> {
     }
 
     try {
-      const { res, ms } = await callRetrieve(token, row.question)
+      const { res, ms } = await callRetrieve(token, row.question, row.kind === 'multi_hop')
       latencies.push(ms)
 
       const recall =
@@ -351,7 +360,12 @@ async function run(): Promise<number> {
         faithfulness,
         relevance,
         noAnswerCorrect,
-        leak
+        leak,
+        hits: res.chunks.map((chunk) => ({
+          docId: chunk.docId,
+          score: chunk.score,
+          text: chunk.text.slice(0, 300)
+        }))
       })
 
       process.stdout.write(
@@ -381,7 +395,9 @@ async function run(): Promise<number> {
   const safe = (n: number, d: number): number => (d === 0 ? 0 : n / d)
   const recallDenom = results.filter((r) => recallPrecisionDenominator(rows.find((x) => x.id === r.id)!)).length
   const recallAvg = safe(
-    results.reduce((s, r) => s + r.recall, 0),
+    results
+      .filter((result) => recallPrecisionDenominator(rows.find((row) => row.id === result.id)!))
+      .reduce((sum, result) => sum + result.recall, 0),
     recallDenom
   )
   const precisionAvg = safe(

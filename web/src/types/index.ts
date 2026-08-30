@@ -178,6 +178,16 @@ export interface DocumentSubmission {
   scopeKind: ScopeKind
   submitterId: string
   submitterName: string
+  scanStatus: 'queued' | 'scanning' | 'passed' | 'failed'
+  scanReport?: ScanReport | null
+}
+
+export interface ScanReport {
+  status: 'passed' | 'failed'
+  detectedMime: string
+  engines: Array<{ name: string; status: string; detail?: string }>
+  findings: Array<{ code: string; severity: 'info' | 'warning' | 'high' | 'critical'; message: string; path?: string }>
+  scannedAt: number
 }
 
 export interface SkillSubmission {
@@ -195,6 +205,9 @@ export interface SkillSubmission {
   scopeKind: ScopeKind
   submitterId: string
   submitterName: string
+  scanStatus: 'queued' | 'scanning' | 'passed' | 'failed'
+  scanReport?: ScanReport | null
+  changelog?: string | null
 }
 
 export interface ModelConfig {
@@ -225,6 +238,16 @@ export interface ModelConfig {
     crossEncoder: boolean
     productionReady: boolean
   }
+}
+
+export interface EnterprisePolicy {
+  version: number
+  allowLocalKnowledge: boolean
+  allowPersonalCloud: boolean
+  allowSkillSubmission: boolean
+  offlineEnterpriseContent: boolean
+  managedSkillLeaseHours: number
+  updatedAt: number
 }
 
 export interface QualityOverview {

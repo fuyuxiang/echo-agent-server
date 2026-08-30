@@ -24,6 +24,7 @@ import { registerSyncRoutes } from './routes/sync.js'
 import { registerQualityRoutes } from './routes/quality.js'
 import { registerDocumentSubmissionRoutes } from './routes/document-submissions.js'
 import { registerBootstrapRoutes } from './routes/bootstrap.js'
+import { probeAntivirus } from './security/content-scanner.js'
 import { registerKnowledgeAskRoutes } from './routes/knowledge-ask.js'
 import { registerSkillRoutes } from './routes/skills.js'
 import { registerMcpRoutes } from './mcp.js'
@@ -132,6 +133,7 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
     const ocrConfigured = deps.ocrClient.configured
     const vlmConfigured = deps.vlmClient.configured
     const dimensionCompatible = deps.embedder.dim === VECTOR_INDEX_DIM
+    const antivirusAvailable = cfg.antivirusHost ? await probeAntivirus(cfg) : false
     const allReal =
       deps.embedder.semantic &&
       deps.reranker.crossEncoder &&
@@ -152,8 +154,15 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
         crossEncoder: deps.reranker.crossEncoder,
         ocr: { configured: ocrConfigured },
         vlm: { configured: vlmConfigured },
-        productionReady: allReal,
-        mode: allReal ? 'production' : 'placeholder'
+        antivirus: {
+          configured: !!cfg.antivirusHost,
+          required: cfg.antivirusRequired,
+          available: antivirusAvailable
+        },
+        productionReady: allReal && (!cfg.antivirusRequired || antivirusAvailable),
+        mode: allReal && (!cfg.antivirusRequired || antivirusAvailable)
+          ? 'production'
+          : 'placeholder'
       }
     }
   })

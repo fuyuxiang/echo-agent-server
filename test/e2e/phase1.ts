@@ -2,7 +2,7 @@
  * 端到端脚本 —— phase1 业务闭环。
  *
  * 四个场景:
- *   1. 用户 A 登录 → 问"报销标准" → top-1 含目标文档
+ *   1. 用户 A 登录 → 问"报销需要几级审批" → 命中目标文档
  *   2. 用户 A 移出财务组 → 同问 → 空结果或仅公开文档
  *   3. 用户 B 提交候选知识 → 审核通过 → 用户 A 当日能查到
  *   4. 用户 A 离线(撤回 device 但保留 token)→ 缓存命中最近一次同步
@@ -14,8 +14,7 @@
  *   - 不依赖 web/dist:serveWeb:false。
  *
  * 约束:
- *   - 不修改 eval/* 与 src/routes/model-config.ts;
- *   - 165 个原有单测不在此文件断言;
+ *   - 不修改 src/routes/model-config.ts;
  *   - 跑完清理临时 db 文件。
  */
 
@@ -30,34 +29,17 @@ import { buildApp } from '../../src/app.js'
 import { ensureOrgScope } from '../../src/server.js'
 import { createUser } from '../../src/dao/users.js'
 
-// 评估 fixture 的命中关键词:"报销 标准" 出现在 d_reimburse_v3 / d_travel_v3
-// 与 d_fin_internal 等,但 d_reimburse_v3 是 org 公开,任何成员可达。
-const QUERY = '报销标准'
+// fixture 中 d_reimburse_v3 明确包含“5000 元以下/以上”审批证据。
+// 不使用模糊的“报销标准”，避免把诚实拒答误判为检索失败。
+const QUERY = '报销需要几级审批'
 const TARGET_PUBLIC_DOC = 'd_reimburse_v3'
 
-// 临时 db 文件 + 配套 env。fixture.ts 顶层会启动时跑一次 main() 用
-// ECHO_DB_PATH 灌库,必须先设置这个 env 到一个合法可写的 SQLite 文件,否则
-// main() 失败 → process.exit(1) → vitest 报 unhandled rejection。
-// 顶层 sync 代码在所有 import 之前执行,所以这里先建临时文件 + set env,
-// 再用 dynamic import 加载 fixture(让它的 main() 入口时 env 已就位)。
+// 临时 db 文件。fixture 的 CLI 入口有 main guard，被测试导入时
+// 不再自动灌库或退出进程。
 const tmpDir = mkdtempSync(join(tmpdir(), 'echo-e2e-'))
 const dbPath = join(tmpDir, 'e2e.db')
-process.env.ECHO_DB_PATH = dbPath
 process.env.ECHO_DISABLE_LOGIN_THROTTLE = '1'
 
-// fixture.ts 的 fixtureIntoDb 假设 org scope 已存在(server 启动时创建)。
-// 顶层 main() 在我们 beforeAll 之前就跑,若 db 文件为空,openDb 会自动
-// 迁移,但 org scope 不会自动创建,fixtureIntoDb 就会抛"org scope 不存在"。
-// 这里预先 openDb + ensureOrgScope,让顶层 main() 也能跑通。
-{
-  const pre = openDb({ path: dbPath })
-  ensureOrgScope(pre)
-  pre.close()
-}
-
-// 用 dynamic import: 确保 ECHO_DB_PATH 已经设置好,fixture.ts 顶层 main()
-// 同步执行时不再失败。`fixtureIntoDb` 随后我们在 beforeAll 里再次调用,
-// 用 dbPath 灌库。
 const fixtureModulePromise = import('../../eval/fixture.js') as Promise<{
   fixtureIntoDb: (dbPath: string) => Promise<void>
 }>
@@ -66,11 +48,11 @@ let db: DB
 let app: FastifyInstance
 
 beforeAll(async () => {
-  // 等顶层 main() 跑完(它会用 ECHO_DB_PATH,等同 dbPath,灌一份基线数据)
-  await new Promise((r) => setTimeout(r, 100))
-
-  // 顶层 main() 已经用 fixtureIntoDb 灌好 64 篇文档;这里直接打开
-  // 同一份 db,不再重复灌(否则 chunk_vectors 主键会冲突)。
+  const pre = openDb({ path: dbPath })
+  ensureOrgScope(pre)
+  pre.close()
+  const { fixtureIntoDb } = await fixtureModulePromise
+  await fixtureIntoDb(dbPath)
   db = openDb({ path: dbPath })
   app = buildApp({ db, cfg: testConfig(), serveWeb: false })
 })
@@ -122,7 +104,7 @@ async function retrieve(
 }
 
 describe('phase1 业务闭环', () => {
-  it('场景 1:用户 A 登录 → 问"报销标准" → top-1 含目标文档', async () => {
+  it('场景 1:用户 A 登录 → 问报销审批级别 → 命中目标文档', async () => {
     // 用户 A 必须在财务组,这样可以看到团队文档,也能看到组织文档
     const userA = db
       .prepare("SELECT id FROM users WHERE username = 'u_member_fin'")

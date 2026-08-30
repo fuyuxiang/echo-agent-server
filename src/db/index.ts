@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
 import * as sqliteVec from 'sqlite-vec'
+import { indexableText } from '../kb/retrieve/text.js'
 
 export type DB = Database.Database
 
@@ -57,6 +58,9 @@ export function openDb(opts: OpenOptions = {}): DB {
   // 等锁而非立即报 SQLITE_BUSY:摄取 worker 与请求并发写时更稳。
   db.pragma('busy_timeout = 5000')
   sqliteVec.load(db)
+  // SQL trigger 也必须走与文档块一致的中文 bigram 归一化。将纯函数注册给
+  // SQLite 后，直接 SQL 写入 org_memories（审核、迁移、测试）也不会绕过索引。
+  db.function('echo_index_text', { deterministic: true }, indexableText)
 
   if (!opts.skipMigrate) migrate(db)
   return db

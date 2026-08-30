@@ -185,7 +185,7 @@ export function vectorSearch(
   return rows.map((r, i) => ({ ...r, rank: i + 1 }))
 }
 
-/** 组织记忆的语义召回。记忆是提炼过的短陈述,与文档 chunk 分开检索。 */
+/** 组织记忆的 FTS 召回。记忆是提炼过的短陈述,与文档 chunk 分开检索。 */
 export interface MemoryHit {
   id: string
   kind: string
@@ -195,11 +195,8 @@ export interface MemoryHit {
 }
 
 /**
- * 记忆量级小(百条量级),不再做完整向量索引;这里用 LIKE + bm25 兜底。
- *
- * LIKE 匹配是关键词级,bm25 是文本相关性级;两者任一命中即返回,
- * 排序按 confidence 与 hit_count —— 记忆与文档 chunk 不同,前者是已提炼
- * 的短陈述,相关性主要靠 kind / confidence 而非字面相似度。
+ * 使用迁移维护的 FTS5 索引，先做文本相关性排序，再在权限
+ * 和有效期条件内结合 confidence。
  */
 export function searchMemories(
   db: DB,
@@ -211,32 +208,20 @@ export function searchMemories(
   const match = buildFtsQuery(query)
   if (!match) return []
 
-  const terms = match
-    .split(' OR ')
-    .map((t) => t.replace(/"/g, ''))
-    .filter(Boolean)
-    .slice(0, 8)
-  if (terms.length === 0) return []
-
-  const likeClause = terms.map(() => 'm.content LIKE ?').join(' OR ')
   const placeholders = ctx.scopeIds.map(() => '?').join(',')
   const now = Date.now()
 
-  // 用 EXISTS 替代 OR LIKE:SQLite planner 更愿意走索引,避免大 OR 展开。
-  // 每个 term 一个 EXISTS,任一命中即纳入候选。
-  const existsClause = terms
-    .map(() => 'EXISTS (SELECT 1 FROM json_each(?) je WHERE m.content LIKE \'%\' || je.value || \'%\')')
-    .join(' OR ')
-
   const sql = `
     SELECT m.id, m.kind, m.content, s.kind AS scopeKind, m.confidence
-      FROM org_memories m
+      FROM org_memories_fts f
+      JOIN org_memories m ON m.id=f.memory_id
       JOIN v_effective_scopes s ON s.id = m.scope_id
-     WHERE m.scope_id IN (${placeholders})
+     WHERE org_memories_fts MATCH ?
+       AND m.scope_id IN (${placeholders})
        AND m.status = 'active'
-       AND (${likeClause})
      ORDER BY
        CASE WHEN m.valid_until IS NOT NULL AND m.valid_until < ? THEN 1 ELSE 0 END,
+       bm25(org_memories_fts),
        m.confidence DESC,
        m.hit_count DESC
      LIMIT ?
@@ -244,8 +229,8 @@ export function searchMemories(
   return db
     .prepare(sql)
     .all(
+      match,
       ...ctx.scopeIds,
-      ...terms.map((t) => `%${t}%`),
       now,
       limit
     ) as MemoryHit[]

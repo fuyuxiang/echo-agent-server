@@ -62,6 +62,7 @@ export default function AppLayout() {
           { key: '/groups', icon: <TeamOutlined />, label: '分组管理' },
           { key: '/model-config', icon: <SettingOutlined />, label: '模型配置' },
           { key: '/audit', icon: <SafetyOutlined />, label: '审计日志' },
+          { key: '/enterprise-policy', icon: <SafetyOutlined />, label: '企业策略' },
         ]
       : []),
   ]
