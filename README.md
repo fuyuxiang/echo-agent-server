@@ -43,6 +43,10 @@ npm run dev
 | `ECHO_ANTIVIRUS_*` | ClamAV 地址、超时及是否故障关闭。 |
 | `ECHO_BACKUP_DIR/INTERVAL_HOURS/RETENTION` | SQLite 在线备份目录、周期和保留份数。 |
 | `ECHO_CORS_ORIGINS` | 跨域白名单；留空只允许同源。 |
+| `ECHO_COOKIE_SECURE` | HTTPS 部署保持默认 `true`；纯 HTTP 内网入口必须显式设为 `false`，否则刷新 cookie 会被浏览器丢弃。 |
+| `ECHO_DEBIAN_MIRROR` | Dockerfile 构建参数；受限网络下替换 Debian 源地址，例如 `http://mirrors.aliyun.com/debian`。 |
+| `ECHO_DISABLE_LOGIN_THROTTLE` | 仅 `eval`/CI 用，设为 `1` 关闭登录限流；生产保持默认关闭。 |
+| `ECHO_ACCESS_TTL` / `ECHO_REFRESH_TTL_MS` | access token 有效期（默认 `1h`）与 refresh token 有效期（默认 30 天）。 |
 
 所有 `*KEY`、JWT、主密钥和管理员密码均支持对应的 `*_FILE`，用于 Docker/Kubernetes secrets。完整字段见 [.env.example](.env.example) 与 [.env.production.example](.env.production.example)。
 
@@ -59,6 +63,18 @@ docker compose --env-file .env.production up -d --build
 ```
 
 生产镜像内置 ffmpeg。Compose 默认要求聊天、真实嵌入、精排、OCR、VLM、音视频转写和 ClamAV 均配置完成；未满足时服务仍会输出诊断，但不会被标记为 production-ready，Caddy 也不会提前接流量。备份写入可持久化的 `echo_backups` 命名卷，数据库迁移前还会额外自动创建快照；正式灾备应再把该卷定期同步到异机或对象存储。
+
+如果是不出公网的纯 HTTP 内网部署（不要 Caddy 反代、不做 TLS），用 `deploy/docker-compose.direct.yml` 作为 overlay：
+
+```bash
+ECHO_PUBLIC_PORT=8787 \
+ECHO_DEBIAN_MIRROR='http://mirrors.aliyun.com/debian' \
+docker compose --env-file .env.production \
+  -f docker-compose.yml -f deploy/docker-compose.direct.yml \
+  up -d --build
+```
+
+该 overlay 会显式设置 `ECHO_COOKIE_SECURE=false` 并把服务端直接以 HTTP 暴露在 `ECHO_PUBLIC_PORT`（默认 8787）。**纯 HTTP 模式必须同步关闭 secure cookie**，否则浏览器不会回写 refresh token，管理后台每次重启会话都会失效；CSP 的 `upgrade-insecure-requests` 在直连模式下也会被服务端关掉，避免同源脚本被改写成 HTTPS 请求导致白屏。
 
 ## 验证
 
