@@ -1,0 +1,10 @@
+services:
+  echo-server:
+    build:
+      args:
+        ECHO_DEBIAN_MIRROR: ${ECHO_DEBIAN_MIRROR:-}
+    environment:
+      # This override publishes a plain-HTTP endpoint without Caddy/TLS.
+      ECHO_COOKIE_SECURE: "false"
+    ports:
+      - "${ECHO_PUBLIC_PORT:-8787}:8787"

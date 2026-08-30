@@ -105,7 +105,11 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   // 安全中间件:helmet 给一组安全的默认响应头;CORS 仅允许显式白名单
   // origin;rate-limit 默认对所有路由启用,具体路由按 per-route 配置
   // 覆盖阈值。生产必须配 ECHO_CORS_ORIGINS,默认空表示"无跨域"。
+  // 纯 HTTP 内网入口不能发送 upgrade-insecure-requests，否则浏览器会把
+  // 同源 JS/CSS 改成 HTTPS 请求，页面拿到 200 后仍会因脚本加载失败而空白。
+  const plainHttp = cfg.cookieSecure === false
   app.register(helmet, {
+    strictTransportSecurity: plainHttp ? false : {},
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
@@ -116,7 +120,8 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
         connectSrc: ["'self'"],
         objectSrc: ["'none'"],
         baseUri: ["'self'"],
-        frameAncestors: ["'none'"]
+        frameAncestors: ["'none'"],
+        upgradeInsecureRequests: plainHttp ? null : []
       }
     }
   })

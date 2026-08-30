@@ -20,6 +20,8 @@ const Schema = z.object({
 
   accessTokenTtl: z.string().default('1h'),
   refreshTokenTtlMs: z.coerce.number().int().positive().default(30 * 24 * 3600_000),
+  // HTTPS 部署默认使用 Secure refresh cookie；纯 HTTP 内网部署可显式关闭。
+  cookieSecure: EnvBoolean.optional(),
 
   embedDim: z.coerce.number().int().positive().default(1024),
   embedModel: z.string().default('bge-m3'),
@@ -120,6 +122,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     masterKey: secretValue(env, 'ECHO_MASTER_KEY'),
     accessTokenTtl: env.ECHO_ACCESS_TTL,
     refreshTokenTtlMs: env.ECHO_REFRESH_TTL_MS,
+    cookieSecure: env.ECHO_COOKIE_SECURE,
     embedDim: env.ECHO_EMBED_DIM,
     embedModel: env.ECHO_EMBED_MODEL,
     rerankModel: env.ECHO_RERANK_MODEL,

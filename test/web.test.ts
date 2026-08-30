@@ -35,7 +35,7 @@ async function appWithStatic(root: string) {
   const staticPlugin = (await import('@fastify/static')).default
   app.get('/api/v1/health', async () => ({ ok: true }))
   await app.register(async (scope) => {
-    await scope.register(staticPlugin, { root, prefix: '/' })
+    await scope.register(staticPlugin, { root, prefix: '/', wildcard: false })
     scope.setNotFoundHandler((req, reply) => {
       if (req.method !== 'GET' || req.url.startsWith('/api')) {
         return reply.code(404).send({ code: 4040, msg: '接口不存在', data: null })

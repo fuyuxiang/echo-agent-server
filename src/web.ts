@@ -30,7 +30,9 @@ export function registerWeb(app: FastifyInstance, warn?: (m: string) => void): b
 
   void app.register(async (scope) => {
     const staticPlugin = (await import('@fastify/static')).default
-    await scope.register(staticPlugin, { root, prefix: '/' })
+    // wildcard:false 让不存在的前端路径进入下方 notFoundHandler；默认的
+    // wildcard 路由会先吃掉 /login、/documents 并直接返回 404。
+    await scope.register(staticPlugin, { root, prefix: '/', wildcard: false })
 
     // SPA 路由回退:/documents、/review 这些路径在磁盘上没有对应文件,
     // 必须回 index.html 交给前端路由,否则刷新页面就 404。

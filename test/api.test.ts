@@ -1,14 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import type { FastifyInstance } from 'fastify'
 import { openDb, type DB } from '../src/db/index.js'
-import { testConfig } from '../src/config.js'
+import { testConfig, type Config } from '../src/config.js'
 import { buildApp } from '../src/app.js'
 import { createUser } from '../src/dao/users.js'
 import { ensureOrgScope } from '../src/server.js'
 
-const cfg = testConfig()
-
-async function setup(): Promise<{ db: DB; app: FastifyInstance }> {
+async function setup(over: Partial<Config> = {}): Promise<{ db: DB; app: FastifyInstance }> {
   const db = openDb({ path: ':memory:' })
   ensureOrgScope(db)
   await createUser(db, {
@@ -18,7 +16,7 @@ async function setup(): Promise<{ db: DB; app: FastifyInstance }> {
     clearance: 2
   })
   await createUser(db, { username: 'alice', password: 'alice-password' })
-  return { db, app: buildApp({ db, cfg, serveWeb: false }) }
+  return { db, app: buildApp({ db, cfg: testConfig(over), serveWeb: false }) }
 }
 
 async function login(
@@ -79,6 +77,24 @@ describe('鉴权', () => {
     expect(refreshed.statusCode).toBe(200)
     expect(refreshed.json().data.accessToken).toBeTruthy()
     expect(refreshed.headers['set-cookie']).toContain('echo_refresh=')
+  })
+
+  it('可按入口协议显式控制 refresh cookie 的 Secure 属性', async () => {
+    const secure = await setup({ cookieSecure: true })
+    const secureLogin = await secure.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { username: 'alice', password: 'alice-password' }
+    })
+    expect(secureLogin.headers['set-cookie']).toContain('Secure')
+
+    const http = await setup({ cookieSecure: false })
+    const httpLogin = await http.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { username: 'alice', password: 'alice-password' }
+    })
+    expect(httpLogin.headers['set-cookie']).not.toContain('Secure')
   })
 
   it('密码错误与用户不存在返回相同错误(防用户名枚举)', async () => {
@@ -439,6 +455,22 @@ describe('健康检查', () => {
       'chat_unavailable'
     ]))
     expect(res.headers['content-security-policy']).toContain("default-src 'self'")
+  })
+
+  it('纯 HTTP 入口不强制升级静态资源，HTTPS 入口保留安全策略', async () => {
+    const http = await setup({ cookieSecure: false })
+    const httpRes = await http.app.inject({ method: 'GET', url: '/api/v1/health' })
+    expect(httpRes.headers['content-security-policy']).not.toContain(
+      'upgrade-insecure-requests',
+    )
+    expect(httpRes.headers['strict-transport-security']).toBeUndefined()
+
+    const https = await setup({ cookieSecure: true })
+    const httpsRes = await https.app.inject({ method: 'GET', url: '/api/v1/health' })
+    expect(httpsRes.headers['content-security-policy']).toContain(
+      'upgrade-insecure-requests',
+    )
+    expect(httpsRes.headers['strict-transport-security']).toBeTruthy()
   })
 
   it('核心模型通过环境配置后可达到生产就绪，可选媒体能力不误阻塞', async () => {

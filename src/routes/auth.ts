@@ -39,17 +39,21 @@ function cookieValue(header: string | undefined, name: string): string | undefin
 function setRefreshCookie(
   reply: import('fastify').FastifyReply,
   token: string,
-  maxAgeMs: number
+  maxAgeMs: number,
+  secureCookies: boolean
 ): void {
-  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
+  const secure = secureCookies ? '; Secure' : ''
   reply.header(
     'set-cookie',
     `${REFRESH_COOKIE}=${encodeURIComponent(token)}; Path=/api/v1/auth; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(maxAgeMs / 1000)}${secure}`
   )
 }
 
-function clearRefreshCookie(reply: import('fastify').FastifyReply): void {
-  const secure = process.env.NODE_ENV === 'production' ? '; Secure' : ''
+function clearRefreshCookie(
+  reply: import('fastify').FastifyReply,
+  secureCookies: boolean
+): void {
+  const secure = secureCookies ? '; Secure' : ''
   reply.header(
     'set-cookie',
     `${REFRESH_COOKIE}=; Path=/api/v1/auth; HttpOnly; SameSite=Strict; Max-Age=0${secure}`
@@ -58,6 +62,7 @@ function clearRefreshCookie(reply: import('fastify').FastifyReply): void {
 
 export function registerAuthRoutes(app: FastifyInstance): void {
   const { db, cfg, throttle } = app.deps
+  const secureCookies = cfg.cookieSecure ?? process.env.NODE_ENV === 'production'
 
   function sessionPayload(userId: string) {
     const user = findById(db, userId)!
@@ -130,7 +135,7 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     // 同设备重复登录先撤旧 refresh token,避免一台设备累积多条记录。
     revokeDeviceTokens(db, row.id, deviceId)
     const refreshToken = issueRefreshToken(db, row.id, deviceId, cfg.refreshTokenTtlMs)
-    setRefreshCookie(reply, refreshToken, cfg.refreshTokenTtlMs)
+    setRefreshCookie(reply, refreshToken, cfg.refreshTokenTtlMs, secureCookies)
 
     app.audit(null, 'login', row.id, { ip: req.ip, deviceId })
     return reply.send(
@@ -148,13 +153,13 @@ export function registerAuthRoutes(app: FastifyInstance): void {
 
     const rec = consumeRefreshToken(db, presentedRefreshToken)
     if (!rec) {
-      clearRefreshCookie(reply)
+      clearRefreshCookie(reply, secureCookies)
       return reply.code(401).send(fail(4015, 'refresh token 无效或已过期'))
     }
 
     const user = findById(db, rec.userId)
     if (!user || user.status !== 'active') {
-      clearRefreshCookie(reply)
+      clearRefreshCookie(reply, secureCookies)
       return reply.code(401).send(fail(4013, '账号不存在或已禁用'))
     }
 
@@ -172,14 +177,14 @@ export function registerAuthRoutes(app: FastifyInstance): void {
       rec.deviceId,
       cfg.refreshTokenTtlMs
     )
-    setRefreshCookie(reply, nextRefreshToken, cfg.refreshTokenTtlMs)
+    setRefreshCookie(reply, nextRefreshToken, cfg.refreshTokenTtlMs, secureCookies)
     return reply.send(ok({ accessToken, refreshToken: nextRefreshToken }))
   })
 
   app.post('/api/v1/auth/logout', { preHandler: app.authenticate }, async (req, reply) => {
     const claims = (req as AuthedRequest).claims
     revokeDeviceTokens(db, claims.sub, claims.device ?? 'default')
-    clearRefreshCookie(reply)
+    clearRefreshCookie(reply, secureCookies)
     app.audit(req, 'logout', claims.sub)
     return reply.code(200).send(ok({ loggedOut: true }))
   })
