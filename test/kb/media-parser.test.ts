@@ -1,5 +1,19 @@
 import { describe, it, expect } from 'vitest'
-import { segmentsToBlocks, mediaParserFor, extOf } from '../../src/kb/parsers/media.js'
+import { execFile } from 'node:child_process'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { promisify } from 'node:util'
+import {
+  createAudioParser,
+  createVideoParser,
+  ffmpegAvailable,
+  segmentsToBlocks,
+  mediaParserFor,
+  extOf
+} from '../../src/kb/parsers/media.js'
+
+const execFileAsync = promisify(execFile)
 
 // whisper 与 ffmpeg 都不在测试栈里,所以测不到的 transcribe/extractAudio
 // 不测。segmentsToBlocks 与 mediaParserFor 是纯函数,值得钉住 —— 它们的
@@ -98,4 +112,54 @@ describe('extOf 工具', () => {
   it('多点的取最后一个', () => {
     expect(extOf('archive.tar.gz')).toBe('.gz')
   })
+})
+
+describe('注入式转写解析', () => {
+  it('音频结果保留可跳转的时间范围', async () => {
+    const parser = createAudioParser({
+      configured: true,
+      model: 'test-whisper',
+      async transcribe() {
+        return [{ startMs: 1200, endMs: 2800, text: '会议结论' }]
+      }
+    })
+    await expect(parser.parse(Buffer.from('audio'), {
+      docId: 'doc-1',
+      fileName: 'meeting.mp3'
+    })).resolves.toEqual([{
+      text: '会议结论',
+      location: { kind: 'timestamp', startMs: 1200, endMs: 2800 }
+    }])
+  })
+
+  it('视频用 ffmpeg 抽取为 mp3 后再转写', async () => {
+    if (!(await ffmpegAvailable())) return
+    const dir = await mkdtemp(join(tmpdir(), 'echo-video-test-'))
+    try {
+      const videoPath = join(dir, 'meeting.mp4')
+      await execFileAsync('ffmpeg', [
+        '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.2',
+        '-c:a', 'aac', videoPath
+      ])
+      const video = await readFile(videoPath)
+      let received: { name: string; mime: string; bytes: number } | null = null
+      const parser = createVideoParser({
+        configured: true,
+        model: 'test-whisper',
+        async transcribe(buf, name, mime) {
+          received = { name, mime, bytes: buf.length }
+          return [{ startMs: 0, endMs: 200, text: '视频语音' }]
+        }
+      })
+      const units = await parser.parse(video, { docId: 'video-doc', fileName: 'meeting.mp4' })
+      expect(received).toMatchObject({ name: 'segment-0.mp3', mime: 'audio/mpeg' })
+      expect(received?.bytes).toBeGreaterThan(0)
+      expect(units[0]).toEqual({
+        text: '视频语音',
+        location: { kind: 'timestamp', startMs: 0, endMs: 200 }
+      })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
 })

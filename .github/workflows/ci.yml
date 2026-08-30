@@ -32,11 +32,31 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: echo-agent-server/web/package-lock.json
+          cache-dependency-path: web/package-lock.json
       - working-directory: web
         run: npm ci --no-audit --no-fund
       - working-directory: web
         run: npm test -- --run
+      - working-directory: web
+        run: npm run build
+
+  production-image:
+    runs-on: ubuntu-latest
+    needs: [build-test, web-test]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验 Compose 配置
+        env:
+          ECHO_PUBLIC_DOMAIN: memory.example.test
+        run: docker compose --env-file .env.production.example config --quiet
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: echo-agent-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   eval:
     runs-on: ubuntu-latest
@@ -59,7 +79,7 @@ jobs:
           ECHO_MASTER_KEY: 'eval-ci-master-key-base64-padded'
           ECHO_ADMIN_USER: admin
           ECHO_ADMIN_PASSWORD: 'admin-pw-12345-ci'
-          ECHO_EVAL_USERS: 'u_member_1:um1-pw,u_member_2:um2-pw,u_member_fin:ufin-pw'
+          ECHO_EVAL_USERS: 'u_member_1:um1-password,u_member_2:um2-password,u_member_fin:ufin-password'
           ECHO_RATE_LIMIT_RETRIEVE: '0'
           ECHO_RATE_LIMIT_LLM: '0'
         run: bash eval/ci.sh
@@ -69,5 +89,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: eval-report
-          path: echo-agent-server/eval/reports/
+          path: eval/reports/
           if-no-files-found: ignore

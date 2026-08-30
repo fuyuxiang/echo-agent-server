@@ -179,12 +179,8 @@ async function bootstrapFixtureUsers(adminToken: string, rows: DatasetRow[]): Pr
   for (const u of usernames) {
     if (u === 'admin') continue
     const password = USER_MAP.get(u) ?? `${u.replace(/[^a-z0-9]/gi, '')}-pw`
-    try {
-      await ensureFixtureUser(adminToken, u, password)
-      console.log(`[eval] fixture 已就绪: ${u}`)
-    } catch (e) {
-      console.warn(`[eval] 创建 fixture 用户失败 (${u}): ${(e as Error).message}`)
-    }
+    await ensureFixtureUser(adminToken, u, password)
+    console.log(`[eval] fixture 已就绪: ${u}`)
   }
 }
 
@@ -265,14 +261,10 @@ async function run(): Promise<number> {
   const judge = buildJudge()
 
   // 用 admin 一次性创建/重置所有 fixture 用户,避开 IP+username 限流。
-  // 失败也继续跑,登录失败会在每条用例上显式记录。
-  try {
-    const adminToken = await loginAs('admin')
-    await bootstrapFixtureUsers(adminToken, rows)
-    tokenCache.set('admin', adminToken)
-  } catch (e) {
-    console.warn(`[eval] fixture 用户预创建失败 (将逐题尝试): ${(e as Error).message}`)
-  }
+  // fixture 失败属于评估基础设施错误,必须在跑 150 条用例前立即中止。
+  const adminToken = await loginAs('admin')
+  await bootstrapFixtureUsers(adminToken, rows)
+  tokenCache.set('admin', adminToken)
 
   for (const row of rows) {
     let token: string | undefined = tokenCache.get(row.as_user)

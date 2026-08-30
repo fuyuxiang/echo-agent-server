@@ -22,10 +22,11 @@ let refreshing: Promise<boolean> | null = null
 
 async function doRefresh(): Promise<boolean> {
   const refreshToken = getRefreshToken()
-  if (!refreshToken) return false
   try {
     // 用裸 axios,避免走本实例的拦截器造成递归。
-    const res = await axios.post('/api/v1/auth/refresh', { refreshToken })
+    // 管理后台通常由 HttpOnly cookie 提供 refresh token；body 回退保留给
+    // 旧会话和非浏览器客户端。
+    const res = await axios.post('/api/v1/auth/refresh', refreshToken ? { refreshToken } : {})
     const body = res.data as Envelope<{ accessToken: string; refreshToken: string }>
     if (body.code !== 0) return false
     updateTokens(body.data.accessToken, body.data.refreshToken)

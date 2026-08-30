@@ -26,9 +26,9 @@ beforeEach(() => clearAuth())
 describe('auth store', () => {
   it('saves and loads auth state', () => {
     saveAuth(sample())
-    expect(loadAuth()).toEqual(sample())
+    expect(loadAuth()).toEqual({ ...sample(), refreshToken: '' })
     expect(getToken()).toBe('access-1')
-    expect(getRefreshToken()).toBe('refresh-1')
+    expect(getRefreshToken()).toBeNull()
     expect(getUser()?.displayName).toBe('管理员')
   })
 
@@ -55,7 +55,7 @@ describe('auth store', () => {
     saveAuth(sample())
     updateTokens('access-2', 'refresh-2')
     expect(getToken()).toBe('access-2')
-    expect(getRefreshToken()).toBe('refresh-2')
+    expect(getRefreshToken()).toBeNull()
     // 刷新不该丢掉会话里的用户信息
     expect(getUser()?.displayName).toBe('管理员')
     expect(getUser()?.scopes).toEqual(['s_org', 's_tech'])

@@ -5,11 +5,11 @@ import type { ModelConfig as Cfg } from '../types'
 import { fmtTime } from '../utils/format'
 
 const PROVIDERS = [
-  { value: 'openai', label: 'OpenAI / 兼容接口' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'azure', label: 'Azure OpenAI' },
-  { value: 'ollama', label: 'Ollama(本地)' },
-  { value: 'compatible', label: '其他 OpenAI 兼容服务' },
+  { value: 'openai', label: 'OpenAI 官方接口' },
+  {
+    value: 'openai-compatible',
+    label: 'OpenAI 兼容服务（模型网关 / Ollama）',
+  },
 ]
 
 export default function ModelConfig() {
@@ -21,7 +21,7 @@ export default function ModelConfig() {
     const c = await api.getModelConfig()
     setCfg(c)
     form.setFieldsValue({
-      chatProvider: c.chatProvider ?? 'openai',
+      chatProvider: c.chatProvider ?? 'openai-compatible',
       chatModel: c.chatModel ?? '',
       chatBaseUrl: c.chatBaseUrl ?? '',
       embedModel: c.embedModel ?? 'bge-m3',
@@ -101,7 +101,11 @@ export default function ModelConfig() {
           <Form.Item name="chatModel" label="对话模型" rules={[{ required: true }]}>
             <Input placeholder="如 gpt-4o / claude-sonnet-4" />
           </Form.Item>
-          <Form.Item name="chatBaseUrl" label="接口地址" extra="使用官方接口可留空">
+          <Form.Item
+            name="chatBaseUrl"
+            label="接口基地址"
+            extra="须兼容 OpenAI chat/completions；OpenAI 官方接口可留空"
+          >
             <Input placeholder="https://..." />
           </Form.Item>
           <Form.Item

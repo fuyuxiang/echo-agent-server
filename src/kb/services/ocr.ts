@@ -9,19 +9,20 @@ export interface OcrClient {
 /**
  * OCR 客户端。
  *
- * 走 cfg.ocrUrl:true 表示已配置,缺位时返回占位实现,避免静默产出空索引 —
- * 后置校验会把没有真实文本的文档标为 failed,而不是悄悄让它 ready。
+ * 走 cfg.ocrUrl:true 表示已配置；缺位时明确抛错。生产 PDF 解析器会先看
+ * configured，并由后置校验把没有真实文本的扫描件标为 failed。
  *
  * cfg 可选:不传时回退到 env(兼容 parsers 在模块加载时调用);
  * 注入路径(app.ts)必须传 cfg,让 Deps 与 health 暴露与真实配置一致。
  */
 export function createOcrClient(cfg?: Config, warn?: (m: string) => void): OcrClient {
   const url = cfg?.ocrUrl ?? process.env.ECHO_OCR_URL
+  const key = cfg?.ocrKey ?? process.env.ECHO_OCR_KEY
   if (!url) {
-    warn?.('未配置 OCR 远端,扫描件将落到占位实现 —— 仅供开发/测试')
+    warn?.('未配置 OCR 远端，扫描 PDF 将明确摄取失败')
     return {
       configured: false,
-      extractFromImage: async (b: Buffer) => `[OCR未配置:${b.length}B]`
+      extractFromImage: async () => { throw new Error('OCR 服务未配置') }
     }
   }
   return {
@@ -29,7 +30,11 @@ export function createOcrClient(cfg?: Config, warn?: (m: string) => void): OcrCl
     extractFromImage: async (buf: Buffer): Promise<string> => {
       const form = new FormData()
       form.append('file', new Blob([new Uint8Array(buf)]), 'page.png')
-      const res = await fetch(url, { method: 'POST', body: form })
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: key ? { authorization: `Bearer ${key}` } : {},
+        body: form
+      })
       if (!res.ok) throw new Error(`ocr API ${res.status}`)
       const j = (await res.json()) as { text: string }
       return j.text

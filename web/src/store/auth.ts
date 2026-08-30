@@ -3,7 +3,9 @@ import type { AuthState, SessionUser } from '../types'
 const KEY = 'echo-admin-auth'
 
 export function saveAuth(state: AuthState): void {
-  localStorage.setItem(KEY, JSON.stringify(state))
+  // 管理后台通过 HttpOnly cookie 轮换 refresh token；localStorage 只保留
+  // 短期 access token。JSON 响应里的 refreshToken 仍供桌面客户端使用。
+  localStorage.setItem(KEY, JSON.stringify({ ...state, refreshToken: '' }))
 }
 
 export function loadAuth(): AuthState | null {
@@ -26,7 +28,7 @@ export function getToken(): string | null {
 }
 
 export function getRefreshToken(): string | null {
-  return loadAuth()?.refreshToken ?? null
+  return loadAuth()?.refreshToken || null
 }
 
 export function getUser(): SessionUser | null {
@@ -34,10 +36,10 @@ export function getUser(): SessionUser | null {
 }
 
 /** access token 刷新后只替换它,保留其余会话信息。 */
-export function updateTokens(accessToken: string, refreshToken: string): void {
+export function updateTokens(accessToken: string, _refreshToken: string): void {
   const cur = loadAuth()
   if (!cur) return
-  saveAuth({ ...cur, accessToken, refreshToken })
+  saveAuth({ ...cur, accessToken, refreshToken: '' })
 }
 
 /**

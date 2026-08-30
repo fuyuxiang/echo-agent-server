@@ -138,9 +138,11 @@ describe('api client', () => {
     expect(refreshCalls).toBe(1)
   })
 
-  it('does not attempt refresh without a refresh token', async () => {
+  it('attempts HttpOnly-cookie refresh without a local refresh token', async () => {
+    bare.onPost('/api/v1/auth/refresh').reply(401)
     mock.onGet('/api/v1/docs').reply(401)
     await expect(client.get('/api/v1/docs')).rejects.toBeTruthy()
-    expect(bare.history.post.length).toBe(0)
+    expect(bare.history.post.length).toBe(1)
+    expect(bare.history.post[0].data).toBe('{}')
   })
 })

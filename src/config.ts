@@ -25,17 +25,40 @@ const Schema = z.object({
   embedModel: z.string().default('bge-m3'),
   rerankModel: z.string().default('bge-reranker-v2-m3'),
 
+  // 服务端统一代理的聊天模型。数据库中的管理员配置优先；环境变量作为
+  // 首次部署和灾难恢复时的可靠回退，避免新库启动后问答只能抽取原文。
+  chatProvider: z.string().default('openai-compatible'),
+  chatModel: z.string().optional(),
+  chatBaseUrl: z.string().optional(),
+  chatKey: z.string().optional(),
+
   // 远端嵌入/精排(不配则用本地 ONNX 或降级实现)
   embedUrl: z.string().optional(),
   embedKey: z.string().optional(),
   rerankUrl: z.string().optional(),
   rerankKey: z.string().optional(),
 
-  // OCR / VLM 远端服务(可选)。不配则扫描件与图片落到占位实现,失败显式化
-  // 而非静默产出空索引。
+  // OCR / VLM 远端服务(可选)。不配则扫描件明确摄取失败、图片入口同步拒绝，
+  // 不会生成伪文本或静默产出空索引。
   ocrUrl: z.string().optional(),
+  ocrKey: z.string().optional(),
   vlmUrl: z.string().optional(),
   vlmKey: z.string().optional(),
+  vlmModel: z.string().optional(),
+
+  // OpenAI-compatible /audio/transcriptions endpoint。音频直接发送，视频
+  // 先由 ffmpeg 抽取音轨。未配置时上传入口会同步拒绝，而不是先显示成功。
+  transcribeUrl: z.string().optional(),
+  transcribeKey: z.string().optional(),
+  transcribeModel: z.string().default('whisper-1'),
+  transcribeTimeoutMs: z.coerce.number().int().min(5_000).max(30 * 60_000).default(10 * 60_000),
+
+  // 部署可按实际承诺的文件类型收紧 readiness。聊天是完整问答的核心，
+  // 默认必须；OCR/VLM/音视频是可选能力，生产全功能模板会显式要求。
+  requireChat: EnvBoolean.default(true),
+  requireOcr: EnvBoolean.default(false),
+  requireVlm: EnvBoolean.default(false),
+  requireTranscription: EnvBoolean.default(false),
 
   // ClamAV clamd INSTREAM 扫描。生产将 required 设为 true 后，
   // 引擎不可用会故障关闭，不会把未扫描内容发布。
@@ -47,6 +70,11 @@ const Schema = z.object({
   maxUploadBytes: z.coerce.number().int().positive().default(200 * 1024 * 1024),
   // volatile 文档超过这个天数即在答案里标注"可能过时"
   staleDays: z.coerce.number().int().positive().default(90),
+
+  // SQLite 在线备份。0 小时表示只保留迁移前备份、不启用周期任务。
+  backupDir: z.string().default('./backups'),
+  backupIntervalHours: z.coerce.number().int().min(0).max(24 * 30).default(24),
+  backupRetention: z.coerce.number().int().min(1).max(365).default(14),
 
   initialAdminUser: z.string().default('admin'),
   initialAdminPassword: z.string().optional(),
@@ -95,19 +123,36 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     embedDim: env.ECHO_EMBED_DIM,
     embedModel: env.ECHO_EMBED_MODEL,
     rerankModel: env.ECHO_RERANK_MODEL,
+    chatProvider: env.ECHO_CHAT_PROVIDER,
+    chatModel: env.ECHO_CHAT_MODEL,
+    chatBaseUrl: env.ECHO_CHAT_BASE_URL,
+    chatKey: secretValue(env, 'ECHO_CHAT_KEY'),
     embedUrl: env.ECHO_EMBED_URL,
     embedKey: secretValue(env, 'ECHO_EMBED_KEY'),
     rerankUrl: env.ECHO_RERANK_URL,
     rerankKey: secretValue(env, 'ECHO_RERANK_KEY'),
     ocrUrl: env.ECHO_OCR_URL,
+    ocrKey: secretValue(env, 'ECHO_OCR_KEY'),
     vlmUrl: env.ECHO_VLM_URL,
     vlmKey: secretValue(env, 'ECHO_VLM_KEY'),
+    vlmModel: env.ECHO_VLM_MODEL,
+    transcribeUrl: env.ECHO_TRANSCRIBE_URL,
+    transcribeKey: secretValue(env, 'ECHO_TRANSCRIBE_KEY'),
+    transcribeModel: env.ECHO_TRANSCRIBE_MODEL,
+    transcribeTimeoutMs: env.ECHO_TRANSCRIBE_TIMEOUT_MS,
+    requireChat: env.ECHO_REQUIRE_CHAT,
+    requireOcr: env.ECHO_REQUIRE_OCR,
+    requireVlm: env.ECHO_REQUIRE_VLM,
+    requireTranscription: env.ECHO_REQUIRE_TRANSCRIPTION,
     antivirusHost: env.ECHO_ANTIVIRUS_HOST,
     antivirusPort: env.ECHO_ANTIVIRUS_PORT,
     antivirusRequired: env.ECHO_ANTIVIRUS_REQUIRED,
     antivirusTimeoutMs: env.ECHO_ANTIVIRUS_TIMEOUT_MS,
     maxUploadBytes: env.ECHO_MAX_UPLOAD_BYTES,
     staleDays: env.ECHO_STALE_DAYS,
+    backupDir: env.ECHO_BACKUP_DIR,
+    backupIntervalHours: env.ECHO_BACKUP_INTERVAL_HOURS,
+    backupRetention: env.ECHO_BACKUP_RETENTION,
     initialAdminUser: env.ECHO_ADMIN_USER,
     initialAdminPassword: secretValue(env, 'ECHO_ADMIN_PASSWORD'),
     corsOrigins: env.ECHO_CORS_ORIGINS,
@@ -162,17 +207,24 @@ export function loadConfigFromDb(
     .prepare(
       `SELECT embed_model AS embedModel,
               embed_dim   AS embedDim,
-              rerank_model AS rerankModel
+              rerank_model AS rerankModel,
+              vlm_model AS vlmModel
          FROM model_configs WHERE id = 'default'`
     )
     .get() as
-    | { embedModel: string; embedDim: number; rerankModel: string | null }
+    | {
+        embedModel: string
+        embedDim: number
+        rerankModel: string | null
+        vlmModel: string | null
+      }
     | undefined
   if (!row) return baseCfg
   return {
     ...baseCfg,
     embedModel: row.embedModel,
     embedDim: row.embedDim,
-    rerankModel: row.rerankModel ?? baseCfg.rerankModel
+    rerankModel: row.rerankModel ?? baseCfg.rerankModel,
+    vlmModel: row.vlmModel ?? baseCfg.vlmModel
   }
 }

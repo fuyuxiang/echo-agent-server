@@ -5,11 +5,10 @@ import { testConfig } from '../../../src/config.js'
 describe('VLM cfg 注入', () => {
   afterEach(() => vi.restoreAllMocks())
 
-  it('cfg.vlmUrl 未设 → 占位返回,configured=false', async () => {
+  it('cfg.vlmUrl 未设 → 明确不可用,configured=false', async () => {
     const c = createVlmClient(testConfig())
     expect(c.configured).toBe(false)
-    const text = await c.caption(Buffer.from('xxx'), 'image/png')
-    expect(text).toMatch(/VLM未配置/)
+    await expect(c.caption(Buffer.from('xxx'), 'image/png')).rejects.toThrow('未配置')
   })
 
   it('cfg.vlmUrl 已设 → 走 fetch,configured=true,带 Bearer 鉴权', async () => {
@@ -21,7 +20,11 @@ describe('VLM cfg 注入', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
     const c = createVlmClient(
-      testConfig({ vlmUrl: 'https://vlm.test/v1', vlmKey: 'sk-vlm' })
+      testConfig({
+        vlmUrl: 'https://vlm.test/v1',
+        vlmKey: 'sk-vlm',
+        vlmModel: 'vision-prod'
+      })
     )
     expect(c.configured).toBe(true)
     const text = await c.caption(Buffer.from('xxx'), 'image/png')
@@ -30,6 +33,8 @@ describe('VLM cfg 注入', () => {
     // FormData 含 max_tokens=300 / lang=zh
     const init = fetchMock.mock.calls[0][1] as RequestInit
     expect(init.body).toBeInstanceOf(FormData)
+    expect((init.body as FormData).get('model')).toBe('vision-prod')
+    expect(c.model).toBe('vision-prod')
   })
 
   it('远端 5xx 抛错', async () => {

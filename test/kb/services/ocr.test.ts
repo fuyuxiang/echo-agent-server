@@ -3,12 +3,10 @@ import { createOcrClient } from '../../../src/kb/services/ocr.js'
 import { testConfig } from '../../../src/config.js'
 
 describe('OCR cfg 注入', () => {
-  it('cfg.ocrUrl 未设 → 占位返回,configured=false', async () => {
+  it('cfg.ocrUrl 未设 → 明确不可用,configured=false', async () => {
     const c = createOcrClient(testConfig())
     expect(c.configured).toBe(false)
-    const text = await c.extractFromImage(Buffer.from('xxx'))
-    expect(text).toMatch(/OCR未配置/)
-    expect(text).toContain('3')
+    await expect(c.extractFromImage(Buffer.from('xxx'))).rejects.toThrow('未配置')
   })
 
   it('cfg.ocrUrl 已设 → 走 fetch,configured=true', async () => {
@@ -16,7 +14,10 @@ describe('OCR cfg 注入', () => {
       new Response(JSON.stringify({ text: 'OCR 抽取的文本' }), { status: 200 })
     )
     vi.stubGlobal('fetch', fetchMock)
-    const c = createOcrClient(testConfig({ ocrUrl: 'https://ocr.test/v1' }))
+    const c = createOcrClient(testConfig({
+      ocrUrl: 'https://ocr.test/v1',
+      ocrKey: 'ocr-secret'
+    }))
     expect(c.configured).toBe(true)
     const text = await c.extractFromImage(Buffer.from('xxx'))
     expect(text).toBe('OCR 抽取的文本')
@@ -26,6 +27,7 @@ describe('OCR cfg 注入', () => {
     expect(calls[0]).toBe('https://ocr.test/v1')
     const init = calls[1] as RequestInit
     expect(init.method).toBe('POST')
+    expect(init.headers).toEqual({ authorization: 'Bearer ocr-secret' })
     expect(init.body).toBeInstanceOf(FormData)
   })
 

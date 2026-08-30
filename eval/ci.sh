@@ -27,6 +27,8 @@ set -euo pipefail
 PORT="${ECHO_EVAL_PORT:-8789}"
 LOGFILE="${ECHO_EVAL_LOG:-/tmp/echo-eval-server.log}"
 PIDFILE="/tmp/echo-eval-server.pid"
+DB_PATH="/tmp/echo-eval-$$-db"
+STORAGE_PATH="/tmp/echo-eval-$$-storage"
 
 cleanup() {
   if [[ -f "$PIDFILE" ]]; then
@@ -38,6 +40,13 @@ cleanup() {
       kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$PIDFILE"
+  fi
+  # 只清理由本次脚本按固定安全前缀创建的隔离数据。
+  if [[ "$DB_PATH" == /tmp/echo-eval-*-db ]]; then
+    rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm"
+  fi
+  if [[ "$STORAGE_PATH" == /tmp/echo-eval-*-storage ]]; then
+    rm -rf "$STORAGE_PATH"
   fi
 }
 trap cleanup EXIT
@@ -53,8 +62,8 @@ npm run build >/dev/null
 
 echo "[eval:ci] 启动 server (port=$PORT, log=$LOGFILE)..."
 ECHO_PORT="$PORT" \
-ECHO_DB_PATH="/tmp/echo-eval-$$-db" \
-ECHO_STORAGE_DIR="/tmp/echo-eval-$$-storage" \
+ECHO_DB_PATH="$DB_PATH" \
+ECHO_STORAGE_DIR="$STORAGE_PATH" \
 ECHO_DISABLE_LOGIN_THROTTLE=1 \
 node dist/server.js >"$LOGFILE" 2>&1 &
 echo $! > "$PIDFILE"
@@ -74,7 +83,7 @@ for i in {1..40}; do
 done
 
 echo "[eval:ci] 灌 fixture 库..."
-ECHO_DB_PATH="/tmp/echo-eval-$$-db" \
+ECHO_DB_PATH="$DB_PATH" \
   npx tsx eval/fixture.ts
 
 echo "[eval:ci] 跑评估..."

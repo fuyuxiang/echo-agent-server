@@ -8,6 +8,7 @@ import { sourceTypeFromName, SUPPORTED_EXTENSIONS } from '../kb/ingest/parse.js'
 import { enqueueIngest } from '../kb/ingest/worker.js'
 import { fail, ok } from '../reply.js'
 import { scanDocument, type ScanReport } from '../security/content-scanner.js'
+import { sourceCapabilityError } from '../kb/ingest/capabilities.js'
 
 const ReviewSchema = z.object({ note: z.string().max(2000).optional() })
 const PublishCopySchema = z.object({
@@ -140,8 +141,9 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       submissionId: null, docId: existing.id, state: 'approved',
       documentStatus: existing.status, dedup: true
     }))
-
     const bytes = await storage.get(source.storageKey)
+    const capabilityError = await sourceCapabilityError(source.sourceType, app.deps, bytes.length)
+    if (capabilityError) return reply.code(503).send(fail(5033, capabilityError))
     const report = await scanDocument(bytes, source.sourceType, cfg)
     const ext = source.storageKey.split('.').at(-1) || source.sourceType
     const quarantineKey = await storage.put(bytes, ext, 'quarantine/documents')
@@ -247,12 +249,19 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
           .code(415)
           .send(fail(4151, `不支持的文件类型，当前支持: ${SUPPORTED_EXTENSIONS.join(' ')}`))
       }
+      const capabilityError = await sourceCapabilityError(sourceType, app.deps)
+      if (capabilityError) {
+        data.file.resume()
+        return reply.code(503).send(fail(5033, capabilityError))
+      }
       const buf = await data.toBuffer()
       if (data.file.truncated) {
         return reply
           .code(413)
           .send(fail(4131, `文件超过上限 ${Math.floor(cfg.maxUploadBytes / 1048576)}MB`))
       }
+      const sizedCapabilityError = await sourceCapabilityError(sourceType, app.deps, buf.length)
+      if (sizedCapabilityError) return reply.code(503).send(fail(5033, sizedCapabilityError))
 
       const contentHash = createHash('sha256').update(buf).digest('hex')
       const published = db
@@ -562,6 +571,10 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
           WHERE scope_id = ? AND content_hash = ? AND status != 'archived'
           ORDER BY created_at DESC LIMIT 1`
       ).get(row.targetScope, row.contentHash) as { id: string; status: string } | undefined
+      if (!existing) {
+        const capabilityError = await sourceCapabilityError(row.sourceType, app.deps, row.byteSize)
+        if (capabilityError) return reply.code(503).send(fail(5033, capabilityError))
+      }
       const now = Date.now()
       if (!row.publishedStorageKey) {
         const sourceKey = row.quarantineStorageKey ?? row.storageKey

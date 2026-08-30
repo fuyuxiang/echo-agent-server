@@ -2,8 +2,8 @@ import { once } from 'node:events'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { ok, fail } from '../reply.js'
-import { decryptSecret, deriveKey } from '../crypto.js'
 import type { AuthedRequest } from '../auth/jwt.js'
+import { resolveChatConfig } from '../models/chat-config.js'
 
 /**
  * OpenAI-compatible chat proxy.
@@ -27,22 +27,6 @@ const ChatBody = z
   })
   .catchall(z.unknown())
 
-interface ModelConfigRow {
-  chat_provider: string
-  chat_model: string
-  chat_base_url: string | null
-  chat_key_enc: string | null
-}
-
-function pickModelConfig(db: AppDeps['db']): ModelConfigRow | undefined {
-  return db
-    .prepare(
-      `SELECT chat_provider, chat_model, chat_base_url, chat_key_enc
-         FROM model_configs WHERE id = 'default'`
-    )
-    .get() as ModelConfigRow | undefined
-}
-
 interface AppDeps {
   db: import('../db/index.js').DB
   cfg: import('../config.js').Config
@@ -63,7 +47,6 @@ function proxyError(
 
 export function registerLlmRoutes(app: FastifyInstance): void {
   const { db, cfg } = app.deps as unknown as AppDeps
-  const master = deriveKey(cfg.masterKey)
 
   const handler =
     (openAiCompatible: boolean) => async (req: FastifyRequest, reply: FastifyReply) => {
@@ -78,20 +61,15 @@ export function registerLlmRoutes(app: FastifyInstance): void {
         )
       }
 
-      const m = pickModelConfig(db)
-      if (!m?.chat_key_enc) {
-        return proxyError(reply, openAiCompatible, 503, 5031, '服务端尚未配置模型 Key')
-      }
-
-      let key: string
-      try {
-        key = decryptSecret(m.chat_key_enc, master)
-      } catch {
+      const m = resolveChatConfig(db, cfg)
+      if (m.credentialError) {
         return proxyError(reply, openAiCompatible, 503, 5032, '服务端模型 Key 损坏')
       }
+      if (!m.configured || !m.key || !m.model) {
+        return proxyError(reply, openAiCompatible, 503, 5031, '服务端尚未完整配置聊天模型')
+      }
 
-      const baseUrl = (m.chat_base_url ?? 'https://api.openai.com/v1').replace(/\/$/, '')
-      const target = `${baseUrl}/chat/completions`
+      const target = `${m.baseUrl}/chat/completions`
       const { extra, ...incoming } = parsed.data as typeof parsed.data & {
         extra?: Record<string, unknown>
       }
@@ -100,7 +78,7 @@ export function registerLlmRoutes(app: FastifyInstance): void {
         ...(extra ?? {}),
         // Server-side configuration is authoritative. This prevents a caller
         // from selecting an unapproved or unexpectedly expensive model.
-        model: m.chat_model,
+        model: m.model,
         stream: parsed.data.stream
       }
 
@@ -123,7 +101,7 @@ export function registerLlmRoutes(app: FastifyInstance): void {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
-            authorization: `Bearer ${key}`
+            authorization: `Bearer ${m.key}`
           },
           body: JSON.stringify(upstreamBody),
           signal: ctrl.signal
@@ -214,12 +192,14 @@ export function registerLlmRoutes(app: FastifyInstance): void {
   app.post('/api/v1/llm/v1/chat/completions', routeOptions, handler(true))
 
   app.get('/api/v1/llm/health', { preHandler: app.authenticate }, async (_req, reply) => {
-    const m = pickModelConfig(db)
+    const m = resolveChatConfig(db, cfg)
     return reply.send(
       ok({
-        configured: !!m?.chat_key_enc,
-        provider: m?.chat_provider ?? null,
-        model: m?.chat_model ?? null
+        configured: m.configured,
+        provider: m.provider,
+        model: m.model,
+        source: m.source,
+        credentialError: m.credentialError
       })
     )
   })

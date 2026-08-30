@@ -9,6 +9,7 @@ import { deleteChunks } from '../kb/ingest/indexer.js'
 import { sourceTypeFromName, SUPPORTED_EXTENSIONS } from '../kb/ingest/parse.js'
 import { archiveFamilyIfCurrent, createDocumentFamily } from '../dao/documents.js'
 import { scanDocument } from '../security/content-scanner.js'
+import { sourceCapabilityError } from '../kb/ingest/capabilities.js'
 
 const ListQuery = z.object({
   scopeId: z.string().optional(),
@@ -62,6 +63,11 @@ export function registerDocsRoutes(app: FastifyInstance): void {
           .code(415)
           .send(fail(4151, `不支持的文件类型,当前支持: ${SUPPORTED_EXTENSIONS.join(' ')}`))
       }
+      const capabilityError = await sourceCapabilityError(sourceType, app.deps)
+      if (capabilityError) {
+        data.file.resume()
+        return reply.code(503).send(fail(5033, capabilityError))
+      }
 
       const buf = await data.toBuffer()
       if (data.file.truncated) {
@@ -69,6 +75,8 @@ export function registerDocsRoutes(app: FastifyInstance): void {
           .code(413)
           .send(fail(4131, `文件超过上限 ${Math.floor(cfg.maxUploadBytes / 1048576)}MB`))
       }
+      const sizedCapabilityError = await sourceCapabilityError(sourceType, app.deps, buf.length)
+      if (sizedCapabilityError) return reply.code(503).send(fail(5033, sizedCapabilityError))
 
       const hash = createHash('sha256').update(buf).digest('hex')
       const existing = db
@@ -570,6 +578,12 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       if (claims.role !== 'admin' && !canAccessDocument(db, ctx, id)) {
         return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
       }
+      const doc = db.prepare(
+        'SELECT source_type AS sourceType, byte_size AS byteSize FROM documents WHERE id=?'
+      ).get(id) as { sourceType: string; byteSize: number } | undefined
+      if (!doc) return reply.code(404).send(fail(4041, '文档不存在'))
+      const capabilityError = await sourceCapabilityError(doc.sourceType, app.deps, doc.byteSize)
+      if (capabilityError) return reply.code(503).send(fail(5033, capabilityError))
       enqueueIngest(db, id)
       app.audit(req, 'doc_reindex', id)
       return reply.send(ok({ queued: true }))
@@ -633,12 +647,19 @@ export function registerDocsRoutes(app: FastifyInstance): void {
           .code(415)
           .send(fail(4152, `新版本必须与旧版本同类型 (${old.sourceType})`))
       }
+      const capabilityError = await sourceCapabilityError(old.sourceType, app.deps)
+      if (capabilityError) {
+        data.file.resume()
+        return reply.code(503).send(fail(5033, capabilityError))
+      }
       const buf = await data.toBuffer()
       if (data.file.truncated) {
         return reply
           .code(413)
           .send(fail(4131, `文件超过上限 ${Math.floor(cfg.maxUploadBytes / 1048576)}MB`))
       }
+      const sizedCapabilityError = await sourceCapabilityError(old.sourceType, app.deps, buf.length)
+      if (sizedCapabilityError) return reply.code(503).send(fail(5033, sizedCapabilityError))
       const hash = createHash('sha256').update(buf).digest('hex')
       const ext = fileName.slice(fileName.lastIndexOf('.') + 1)
       const quarantineKey = await storage.put(buf, ext, 'quarantine/documents')

@@ -6,6 +6,8 @@ import { requireAdmin, type AuthedRequest } from '../auth/jwt.js'
 import { loadConfigFromDb } from '../config.js'
 import { createEmbedder } from '../models/embedder.js'
 import { createReranker } from '../models/reranker.js'
+import { resolveChatConfig } from '../models/chat-config.js'
+import { createVlmClient } from '../kb/services/vlm.js'
 import { VECTOR_INDEX_DIM } from '../kb/vector-schema.js'
 
 /** PUT 时的 warn,落到 stderr —— 与启动期 createEmbedder/createReranker 保持一致。 */
@@ -71,16 +73,22 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
     const row = db.prepare('SELECT * FROM model_configs WHERE id = ?').get(ROW_ID) as
       | Record<string, unknown>
       | undefined
+    const chat = resolveChatConfig(db, cfg)
 
     if (!row) {
       return reply.send(
         ok({
-          configured: false,
-          chatProvider: null,
-          chatModel: null,
-          embedModel: null,
-          embedDim: null,
-          hasCredential: false,
+          configured: chat.configured,
+          chatProvider: chat.provider,
+          chatModel: chat.model,
+          chatBaseUrl: chat.baseUrl,
+          embedModel: cfg.embedModel,
+          embedDim: cfg.embedDim,
+          rerankModel: cfg.rerankModel,
+          vlmModel: cfg.vlmModel ?? null,
+          hasCredential: !!chat.key,
+          credentialError: chat.credentialError,
+          source: chat.source,
           proxied: true,
           ...runtimeModels()
         })
@@ -90,15 +98,17 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
     return reply.send(
       ok({
         configured: true,
-        chatProvider: row.chat_provider,
-        chatModel: row.chat_model,
-        chatBaseUrl: row.chat_base_url,
+        chatProvider: chat.provider,
+        chatModel: chat.model,
+        chatBaseUrl: chat.baseUrl,
         embedModel: row.embed_model,
         embedDim: row.embed_dim,
         rerankModel: row.rerank_model,
         vlmModel: row.vlm_model,
         // 刻意不含任何 Key 字段。客户端据 proxied=true 走 /api/v1/llm/chat。
-        hasCredential: !!row.chat_key_enc,
+        hasCredential: !!chat.key,
+        credentialError: chat.credentialError,
+        source: chat.source,
         proxied: true,
         updatedAt: row.updated_at,
         ...runtimeModels()
@@ -163,12 +173,14 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
       app.deps.cfg = newCfg
       app.deps.embedder = createEmbedder(newCfg, hotWarn)
       app.deps.reranker = createReranker(newCfg, hotWarn)
+      app.deps.vlmClient = createVlmClient(newCfg, hotWarn)
 
       app.audit(req, 'config_change', ROW_ID, {
         chatModel: v.chatModel,
         embedModel: v.embedModel,
         embedDim: v.embedDim,
-        rerankModel: v.rerankModel
+        rerankModel: v.rerankModel,
+        vlmModel: v.vlmModel
       })
       return reply.send(ok({ updated: true }))
     }

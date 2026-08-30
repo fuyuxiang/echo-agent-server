@@ -10,6 +10,7 @@ import { indexChunks, validateIngest } from './indexer.js'
 import { activateDocumentVersion } from '../../dao/documents.js'
 import type { OcrClient } from '../services/ocr.js'
 import type { VlmClient } from '../services/vlm.js'
+import type { TranscriptionClient } from '../services/transcription.js'
 
 // 租约时长。worker 崩溃或进程重启后,超过这个时间的 running 任务会被重新
 // 领取 —— 没有这个机制,文档会永久卡在 parsing 状态,而且没有任何报错。
@@ -136,6 +137,7 @@ export interface WorkerDeps {
   embedder: Live<Embedder>
   ocrClient?: Live<OcrClient>
   vlmClient?: Live<VlmClient>
+  transcriptionClient?: Live<TranscriptionClient>
   log?: { warn(m: string): void; info?(m: string): void }
 }
 
@@ -176,7 +178,10 @@ export async function tick(deps: WorkerDeps): Promise<boolean> {
         const abs = join(cfg.storageDir, doc.storageKey)
         const result = await parseDocument(abs, doc.sourceType, doc.title, doc.id, {
           ocrClient: deps.ocrClient ? current(deps.ocrClient) : undefined,
-          vlmClient: deps.vlmClient ? current(deps.vlmClient) : undefined
+          vlmClient: deps.vlmClient ? current(deps.vlmClient) : undefined,
+          transcriptionClient: deps.transcriptionClient
+            ? current(deps.transcriptionClient)
+            : undefined
         })
         parsedCache.set(doc.id, result as never)
         advance(db, job.id, 'chunk')

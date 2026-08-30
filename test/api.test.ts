@@ -58,6 +58,27 @@ describe('鉴权', () => {
     expect(d.user.username).toBe('alice')
     // org scope 应当自动可见
     expect(d.user.scopes.length).toBeGreaterThan(0)
+    expect(res.headers['set-cookie']).toContain('echo_refresh=')
+    expect(res.headers['set-cookie']).toContain('HttpOnly')
+    expect(res.headers['set-cookie']).toContain('SameSite=Strict')
+  })
+
+  it('管理后台可只用 HttpOnly cookie 轮换 refresh token', async () => {
+    const loginRes = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { username: 'alice', password: 'alice-password', deviceId: 'admin-web' }
+    })
+    const cookie = String(loginRes.headers['set-cookie']).split(';')[0]
+    const refreshed = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/refresh',
+      headers: { cookie },
+      payload: {}
+    })
+    expect(refreshed.statusCode).toBe(200)
+    expect(refreshed.json().data.accessToken).toBeTruthy()
+    expect(refreshed.headers['set-cookie']).toContain('echo_refresh=')
   })
 
   it('密码错误与用户不存在返回相同错误(防用户名枚举)', async () => {
@@ -408,5 +429,40 @@ describe('健康检查', () => {
     const res = await app.inject({ method: 'GET', url: '/api/v1/health' })
     expect(res.statusCode).toBe(200)
     expect(res.json().schemaVersion).toBeGreaterThan(0)
+    expect(res.json().models).toMatchObject({
+      productionReady: false,
+      mode: 'degraded'
+    })
+    expect(res.json().models.readinessReasons).toEqual(expect.arrayContaining([
+      'embedding_unavailable',
+      'reranker_unavailable',
+      'chat_unavailable'
+    ]))
+    expect(res.headers['content-security-policy']).toContain("default-src 'self'")
+  })
+
+  it('核心模型通过环境配置后可达到生产就绪，可选媒体能力不误阻塞', async () => {
+    const db = openDb({ path: ':memory:' })
+    const app = buildApp({
+      db,
+      cfg: testConfig({
+        chatModel: 'chat-prod',
+        chatKey: 'chat-key',
+        embedUrl: 'https://models.example/embeddings',
+        rerankUrl: 'https://models.example/rerank'
+      }),
+      serveWeb: false
+    })
+    const res = await app.inject({ method: 'GET', url: '/api/v1/health' })
+    expect(res.json().models).toMatchObject({
+      productionReady: true,
+      mode: 'production',
+      readinessReasons: [],
+      chat: { configured: true, source: 'environment' },
+      ocr: { configured: false },
+      vlm: { configured: false }
+    })
+    await app.close()
+    db.close()
   })
 })

@@ -31,8 +31,11 @@ import { registerMcpRoutes } from './mcp.js'
 import { registerWeb } from './web.js'
 import { createOcrClient } from './kb/services/ocr.js'
 import { createVlmClient } from './kb/services/vlm.js'
+import { createTranscriptionClient } from './kb/services/transcription.js'
 import type { Deps, ThrottleLike } from './types.js'
 import { VECTOR_INDEX_DIM } from './kb/vector-schema.js'
+import { ffmpegAvailable } from './kb/parsers/media.js'
+import { resolveChatConfig } from './models/chat-config.js'
 
 export interface BuildOptions {
   db: DB
@@ -60,6 +63,8 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   const reranker = opts.overrides?.reranker ?? createReranker(cfg, warn)
   const ocrClient = opts.overrides?.ocrClient ?? createOcrClient(cfg, warn)
   const vlmClient = opts.overrides?.vlmClient ?? createVlmClient(cfg, warn)
+  const transcriptionClient = opts.overrides?.transcriptionClient
+    ?? createTranscriptionClient(cfg, warn)
   const log = { warn }
 
   // Deps 在此构建,retriever / throttle 后续再补。原因:Retriever 内部持有
@@ -77,6 +82,7 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
     retriever: undefined as unknown as Retriever,
     ocrClient,
     vlmClient,
+    transcriptionClient,
     throttle: undefined as unknown as ThrottleLike
   }
   deps.retriever =
@@ -100,8 +106,19 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   // origin;rate-limit 默认对所有路由启用,具体路由按 per-route 配置
   // 覆盖阈值。生产必须配 ECHO_CORS_ORIGINS,默认空表示"无跨域"。
   app.register(helmet, {
-    // CSP 由 Fastify 静态服务管理,这里关闭默认 CSP,避免影响管理后台。
-    contentSecurityPolicy: false
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'blob:'],
+        fontSrc: ["'self'", 'data:'],
+        connectSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        frameAncestors: ["'none'"]
+      }
+    }
   })
   const corsOrigins = (cfg.corsOrigins ?? '')
     .split(',')
@@ -132,14 +149,26 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
     // 从模型名看不出差别 —— 而两者的检索质量差一个量级。
     const ocrConfigured = deps.ocrClient.configured
     const vlmConfigured = deps.vlmClient.configured
+    const transcriptionConfigured = deps.transcriptionClient.configured
+    const ffmpeg = await ffmpegAvailable()
+    const chat = resolveChatConfig(db, deps.cfg)
     const dimensionCompatible = deps.embedder.dim === VECTOR_INDEX_DIM
-    const antivirusAvailable = cfg.antivirusHost ? await probeAntivirus(cfg) : false
-    const allReal =
-      deps.embedder.semantic &&
-      deps.reranker.crossEncoder &&
-      ocrConfigured &&
-      vlmConfigured &&
-      dimensionCompatible
+    const antivirusAvailable = cfg.antivirusHost
+      ? await probeAntivirus({ ...cfg, antivirusTimeoutMs: Math.min(cfg.antivirusTimeoutMs, 1000) })
+      : false
+    const reasons: string[] = []
+    if (!deps.embedder.semantic) reasons.push('embedding_unavailable')
+    if (!deps.reranker.crossEncoder) reasons.push('reranker_unavailable')
+    if (!dimensionCompatible) reasons.push('embedding_dimension_mismatch')
+    if (deps.cfg.requireChat && !chat.configured) reasons.push('chat_unavailable')
+    if (deps.cfg.requireOcr && !ocrConfigured) reasons.push('ocr_unavailable')
+    if (deps.cfg.requireVlm && !vlmConfigured) reasons.push('vlm_unavailable')
+    if (deps.cfg.requireTranscription && !transcriptionConfigured) {
+      reasons.push('transcription_unavailable')
+    }
+    if (deps.cfg.requireTranscription && !ffmpeg) reasons.push('ffmpeg_unavailable')
+    if (cfg.antivirusRequired && !antivirusAvailable) reasons.push('antivirus_unavailable')
+    const productionReady = reasons.length === 0
     return {
       ok: true,
       version: 1,
@@ -152,17 +181,36 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
         semantic: deps.embedder.semantic,
         reranker: deps.reranker.model,
         crossEncoder: deps.reranker.crossEncoder,
+        chat: {
+          configured: chat.configured,
+          provider: chat.provider,
+          model: chat.model,
+          source: chat.source,
+          credentialError: chat.credentialError,
+          required: deps.cfg.requireChat
+        },
         ocr: { configured: ocrConfigured },
-        vlm: { configured: vlmConfigured },
+        vlm: { configured: vlmConfigured, model: deps.vlmClient.model },
+        transcription: {
+          configured: transcriptionConfigured,
+          model: deps.transcriptionClient.model,
+          ffmpegAvailable: ffmpeg
+        },
         antivirus: {
           configured: !!cfg.antivirusHost,
           required: cfg.antivirusRequired,
           available: antivirusAvailable
         },
-        productionReady: allReal && (!cfg.antivirusRequired || antivirusAvailable),
-        mode: allReal && (!cfg.antivirusRequired || antivirusAvailable)
-          ? 'production'
-          : 'placeholder'
+        requirements: {
+          chat: deps.cfg.requireChat,
+          ocr: deps.cfg.requireOcr,
+          vlm: deps.cfg.requireVlm,
+          transcription: deps.cfg.requireTranscription,
+          antivirus: cfg.antivirusRequired
+        },
+        productionReady,
+        readinessReasons: reasons,
+        mode: productionReady ? 'production' : 'degraded'
       }
     }
   })

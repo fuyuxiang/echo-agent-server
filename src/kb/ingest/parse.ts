@@ -8,10 +8,11 @@ import { xlsxParser } from '../parsers/xlsx.js'
 import { imageCaptionParser, createImageCaptionParser } from '../parsers/image.js'
 // pdfParser 依赖 pdf-parse/pdfjs-dist（要求 Node 18+）。改为按需加载，
 // 避免在 Node 16 之类的旧版本上启动时直接崩溃。
-import { audioParser, videoParser, mediaParserFor } from '../parsers/media.js'
+import { audioParser, videoParser, createAudioParser, createVideoParser } from '../parsers/media.js'
 import type { ParserUnit } from '../parsers/types.js'
 import type { OcrClient } from '../services/ocr.js'
 import type { VlmClient } from '../services/vlm.js'
+import type { TranscriptionClient } from '../services/transcription.js'
 
 export interface ParseResult {
   blocks: Block[]
@@ -117,7 +118,11 @@ export async function parseDocument(
   sourceType: SourceType,
   fileName: string,
   docId: string,
-  services?: { ocrClient?: OcrClient; vlmClient?: VlmClient }
+  services?: {
+    ocrClient?: OcrClient
+    vlmClient?: VlmClient
+    transcriptionClient?: TranscriptionClient
+  }
 ): Promise<ParseResult> {
   const buf = await readFile(filePath)
 
@@ -157,11 +162,17 @@ export async function parseDocument(
       return { blocks: units.map(unitToBlock), pageCount: null }
     }
     case 'audio': {
-      const units = await audioParser.parse(buf, { docId, fileName })
+      const parser = services?.transcriptionClient
+        ? createAudioParser(services.transcriptionClient)
+        : audioParser
+      const units = await parser.parse(buf, { docId, fileName })
       return { blocks: units.map(unitToBlock), pageCount: null }
     }
     case 'video': {
-      const units = await videoParser.parse(buf, { docId, fileName })
+      const parser = services?.transcriptionClient
+        ? createVideoParser(services.transcriptionClient)
+        : videoParser
+      const units = await parser.parse(buf, { docId, fileName })
       return { blocks: units.map(unitToBlock), pageCount: null }
     }
     case 'pdf': {

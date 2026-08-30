@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { AuthedRequest } from '../auth/jwt.js'
-import { decryptSecret, deriveKey } from '../crypto.js'
 import type { RetrievedChunk, RetrieveResponse } from '../kb/retrieve/index.js'
 import { lexicalOverlapScore } from '../models/reranker.js'
+import { resolveChatConfig } from '../models/chat-config.js'
 import { fail } from '../reply.js'
 
 const AskSchema = z.object({
@@ -49,12 +49,6 @@ interface AskFinal {
   qaEventId?: string
   mode: 'fast' | 'deep'
   verification: 'supported' | 'extractive_fallback' | 'insufficient' | 'stale_only'
-}
-
-interface ChatConfigRow {
-  chatModel: string
-  baseUrl: string | null
-  encryptedKey: string | null
 }
 
 function routeMode(question: string, requested: 'fast' | 'deep' | 'auto'): 'fast' | 'deep' {
@@ -188,18 +182,8 @@ async function generateGroundedAnswer(
   repair?: string
 ): Promise<string | null> {
   const { db, cfg } = app.deps
-  const row = db.prepare(
-    `SELECT chat_model AS chatModel, chat_base_url AS baseUrl, chat_key_enc AS encryptedKey
-       FROM model_configs WHERE id = 'default'`
-  ).get() as ChatConfigRow | undefined
-  if (!row?.encryptedKey) return null
-
-  let key: string
-  try {
-    key = decryptSecret(row.encryptedKey, deriveKey(cfg.masterKey))
-  } catch {
-    return null
-  }
+  const chat = resolveChatConfig(db, cfg)
+  if (!chat.configured || !chat.key || !chat.model) return null
   const evidence = citations.map((citation) => ({
     citationId: citation.id,
     title: citation.title,
@@ -213,13 +197,13 @@ async function generateGroundedAnswer(
   const timer = setTimeout(() => ctrl.abort(), 90_000)
   try {
     const response = await fetch(
-      `${(row.baseUrl ?? 'https://api.openai.com/v1').replace(/\/$/, '')}/chat/completions`,
+      `${chat.baseUrl}/chat/completions`,
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${chat.key}` },
         signal: ctrl.signal,
         body: JSON.stringify({
-          model: row.chatModel,
+          model: chat.model,
           temperature: 0.1,
           stream: false,
           messages: [

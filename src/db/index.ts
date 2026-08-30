@@ -66,8 +66,8 @@ export function openDb(opts: OpenOptions = {}): DB {
   return db
 }
 
-/** 在线备份。WAL 模式下安全,不阻塞读写。 */
-export function backupTo(db: DB, destPath: string): void {
+/** better-sqlite3 在线备份 API 在工作线程增量复制，避免阻塞 HTTP 事件循环。 */
+export async function backupTo(db: DB, destPath: string): Promise<void> {
   mkdirSync(dirname(destPath), { recursive: true })
-  db.prepare('VACUUM INTO ?').run(destPath)
+  await db.backup(destPath)
 }

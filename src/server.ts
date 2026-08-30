@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { openDb, type DB } from './db/index.js'
+import { existsSync } from 'node:fs'
+import { openDb, migrate, pendingMigrations, type DB } from './db/index.js'
+import { createDatabaseBackup, DatabaseBackupScheduler } from './db/backups.js'
 import { loadConfig, loadConfigFromDb, type Config } from './config.js'
 import { countUsers, createUser } from './dao/users.js'
 import { purgeExpiredRefreshTokens } from './auth/jwt.js'
@@ -53,9 +55,29 @@ export async function ensureInitialAdmin(db: DB, cfg: Config): Promise<void> {
   console.log(`[echo-server] 已创建初始管理员: ${cfg.initialAdminUser}`)
 }
 
+/** Open an existing database safely: snapshot first, then apply pending migrations. */
+export async function openProductionDatabase(cfg: Config): Promise<DB> {
+  const databaseExisted = cfg.dbPath !== ':memory:' && existsSync(cfg.dbPath)
+  const db = openDb({ path: cfg.dbPath, skipMigrate: true })
+  try {
+    const pending = pendingMigrations(db)
+    const currentVersion = db.pragma('user_version', { simple: true }) as number
+    if (databaseExisted && currentVersion > 0 && pending.length > 0) {
+      const path = await createDatabaseBackup(db, cfg, 'pre-migration')
+      // eslint-disable-next-line no-console
+      console.log(`[echo-server] 迁移前数据库备份完成: ${path}`)
+    }
+    migrate(db)
+    return db
+  } catch (error) {
+    db.close()
+    throw error
+  }
+}
+
 export async function start(): Promise<void> {
   const envCfg = loadConfig()
-  const db = openDb({ path: envCfg.dbPath })
+  const db = await openProductionDatabase(envCfg)
 
   ensureOrgScope(db)
   await ensureInitialAdmin(db, envCfg)
@@ -86,12 +108,19 @@ export async function start(): Promise<void> {
     embedder: () => app.deps.embedder,
     ocrClient: () => app.deps.ocrClient,
     vlmClient: () => app.deps.vlmClient,
+    transcriptionClient: () => app.deps.transcriptionClient,
     log: {
       warn: (m) => console.warn(`[echo-server] ${m}`),
       info: (m) => console.log(`[echo-server] ${m}`)
     }
   })
   worker.start()
+
+  const backupScheduler = new DatabaseBackupScheduler(db, cfg, {
+    info: (m) => console.log(`[echo-server] ${m}`),
+    warn: (m) => console.warn(`[echo-server] ${m}`)
+  })
+  backupScheduler.start()
 
   await app.listen({ port: cfg.port, host: cfg.host })
   // eslint-disable-next-line no-console
@@ -101,6 +130,7 @@ export async function start(): Promise<void> {
     // eslint-disable-next-line no-console
     console.log(`[echo-server] 收到 ${sig},正在退出`)
     worker.stop()
+    await backupScheduler.stop()
     await app.close()
     db.close()
     process.exit(0)

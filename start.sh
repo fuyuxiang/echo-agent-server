@@ -72,11 +72,16 @@ if [ ! -d node_modules ]; then
   echo "[echo-server] 安装依赖..."
   npm install
 fi
+if [ ! -d web/node_modules ]; then
+  echo "[echo-server] 安装管理后台依赖..."
+  npm --prefix web install
+fi
 
-# 构建产物缺失则编译
-if [ ! -f dist/server.js ]; then
-  echo "[echo-server] 构建中 (npm run build)..."
-  npm run build
+# 每次启动都构建，避免 git pull 后继续运行过期 dist/web/dist。
+# restart.sh 已在停服前构建过，会用 ECHO_SKIP_BUILD=1 避免重复构建。
+if [ "${ECHO_SKIP_BUILD:-0}" != "1" ]; then
+  echo "[echo-server] 构建服务端与管理后台 (npm run build:all)..."
+  npm run build:all
 fi
 
 # 把 .env 注入当前 shell。兼容 Node 16（无 --env-file）与未来高版本；

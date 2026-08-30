@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import type { FastifyInstance } from 'fastify'
-import { openDb, type DB } from '../db/index.js'
-import { testConfig } from '../config.js'
-import { buildApp } from '../app.js'
-import { createUser } from '../dao/users.js'
-import { ensureOrgScope } from '../server.js'
+import { openDb, type DB } from '../src/db/index.js'
+import { testConfig } from '../src/config.js'
+import { buildApp } from '../src/app.js'
+import { createUser } from '../src/dao/users.js'
+import { ensureOrgScope } from '../src/server.js'
 
 /**
  * 模型配置热加载单元测试。
@@ -34,6 +34,8 @@ async function setup(): Promise<{
     embedKey: 'sk-embed-test',
     rerankUrl: 'http://rerank.test.invalid/v1',
     rerankKey: 'rk-rerank-test',
+    vlmUrl: 'http://vlm.test.invalid/v1',
+    vlmModel: 'vision-v1',
     embedModel: 'embed-v1',
     rerankModel: 'rerank-v1',
     embedDim: 1024
@@ -84,6 +86,7 @@ describe('模型配置热加载', () => {
     // 记录旧实例引用,用于事后比对"是不是真的换了"。
     const embedderBefore = app.deps.embedder
     const rerankerBefore = app.deps.reranker
+    const vlmBefore = app.deps.vlmClient
 
     // 2. PUT 改成 embed-v2 / rerank-v2
     const put = await app.inject({
@@ -95,7 +98,8 @@ describe('模型配置热加载', () => {
         chatModel: 'gpt-4o-mini',
         embedModel: 'embed-v2',
         embedDim: 1024,
-        rerankModel: 'rerank-v2'
+        rerankModel: 'rerank-v2',
+        vlmModel: 'vision-v2'
       }
     })
     expect(put.statusCode).toBe(200)
@@ -109,9 +113,11 @@ describe('模型配置热加载', () => {
     // 4. 实例必须被替换(不是同一对象)
     expect(app.deps.embedder).not.toBe(embedderBefore)
     expect(app.deps.reranker).not.toBe(rerankerBefore)
+    expect(app.deps.vlmClient).not.toBe(vlmBefore)
     // 而且新实例的 model 字段就是 cfg 上的值
     expect(app.deps.embedder.model).toBe('embed-v2')
     expect(app.deps.reranker.model).toBe('rerank-v2')
+    expect(app.deps.vlmClient.model).toBe('vision-v2')
   })
 
   it('拒绝把 embedDim 热切换到与物理向量表不同的维度', async () => {

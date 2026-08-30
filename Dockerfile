@@ -21,10 +21,15 @@ ENV NODE_ENV=production \
     ECHO_PORT=8787 \
     ECHO_DB_PATH=/app/data/echo.db \
     ECHO_STORAGE_DIR=/app/data/storage \
-    ECHO_MODEL_DIR=/app/data/models
+    ECHO_MODEL_DIR=/app/data/models \
+    ECHO_BACKUP_DIR=/app/backups
 
 WORKDIR /app
-RUN mkdir -p /app/data/storage /app/data/models && chown -R node:node /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /app/data/storage /app/data/models /app/backups \
+    && chown -R node:node /app
 COPY --from=builder --chown=node:node /app/package.json ./package.json
 COPY --from=builder --chown=node:node /app/node_modules ./node_modules
 COPY --from=builder --chown=node:node /app/dist ./dist

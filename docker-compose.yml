@@ -17,6 +17,13 @@ services:
       ECHO_JWT_SECRET_FILE: /run/secrets/echo_jwt_secret
       ECHO_MASTER_KEY_FILE: /run/secrets/echo_master_key
       ECHO_ADMIN_PASSWORD_FILE: /run/secrets/echo_admin_password
+      ECHO_CHAT_KEY_FILE: /run/secrets/echo_chat_key
+      ECHO_EMBED_KEY_FILE: /run/secrets/echo_embed_key
+      ECHO_RERANK_KEY_FILE: /run/secrets/echo_rerank_key
+      ECHO_OCR_KEY_FILE: /run/secrets/echo_ocr_key
+      ECHO_VLM_KEY_FILE: /run/secrets/echo_vlm_key
+      ECHO_TRANSCRIBE_KEY_FILE: /run/secrets/echo_transcribe_key
+      ECHO_BACKUP_DIR: /app/backups
       ECHO_ANTIVIRUS_HOST: clamav
       ECHO_ANTIVIRUS_PORT: 3310
       ECHO_ANTIVIRUS_REQUIRED: "true"
@@ -27,9 +34,15 @@ services:
       - echo_jwt_secret
       - echo_master_key
       - echo_admin_password
+      - echo_chat_key
+      - echo_embed_key
+      - echo_rerank_key
+      - echo_ocr_key
+      - echo_vlm_key
+      - echo_transcribe_key
     volumes:
       - echo_data:/app/data
-      - ./backups:/app/backups
+      - echo_backups:/app/backups
     expose:
       - "8787"
     healthcheck:
@@ -44,7 +57,7 @@ services:
       - ALL
     read_only: true
     tmpfs:
-      - /tmp:size=256m,mode=1777
+      - /tmp:size=512m,mode=1777
     networks:
       - echo_internal
 
@@ -94,9 +107,22 @@ secrets:
     file: ./deploy/secrets/echo_master_key
   echo_admin_password:
     file: ./deploy/secrets/echo_admin_password
+  echo_chat_key:
+    file: ./deploy/secrets/echo_chat_key
+  echo_embed_key:
+    file: ./deploy/secrets/echo_embed_key
+  echo_rerank_key:
+    file: ./deploy/secrets/echo_rerank_key
+  echo_ocr_key:
+    file: ./deploy/secrets/echo_ocr_key
+  echo_vlm_key:
+    file: ./deploy/secrets/echo_vlm_key
+  echo_transcribe_key:
+    file: ./deploy/secrets/echo_transcribe_key
 
 volumes:
   echo_data:
+  echo_backups:
   clamav_data:
   caddy_data:
   caddy_config:
