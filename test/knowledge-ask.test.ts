@@ -185,6 +185,31 @@ describe('桌面端启动与 Agentic RAG', () => {
     expect(db.prepare('SELECT COUNT(*) AS n FROM qa_events').get()).toMatchObject({ n: 1 })
   })
 
+  it('取无页码引用原文时兼容旧客户端发送的 page:null', async () => {
+    const upload = multipartBody(
+      orgScope,
+      '# 无页码制度\n\n这是一份没有页码信息的 Markdown 制度原文。'
+    )
+    const uploaded = await app.inject({
+      method: 'POST',
+      url: '/api/v1/docs/upload',
+      headers: { ...bearer(adminToken), 'content-type': upload.contentType },
+      payload: upload.payload
+    })
+    const docId = uploaded.json().data.docId as string
+    await drain({ db, cfg: app.deps.cfg, embedder: createEmbedder(app.deps.cfg) })
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/docs/fetch',
+      headers: bearer(adminToken),
+      payload: { docId, page: null }
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json().data.text).toContain('没有页码信息')
+  })
+
   it('没有授权内证据时明确拒答', async () => {
     const response = await app.inject({
       method: 'POST',

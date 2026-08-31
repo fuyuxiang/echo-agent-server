@@ -411,7 +411,9 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       const parsed = z
         .object({
           docId: z.string().min(1),
-          page: z.number().int().positive().optional(),
+          // Older desktop clients explicitly sent null when a citation had no
+          // page. Treat it the same as an omitted page and return the full doc.
+          page: z.number().int().positive().nullish(),
           range: z.string().regex(/^-?\d+:-?\d+$/).optional()
         })
         .safeParse(req.body ?? {})
@@ -437,7 +439,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
 
       const params: unknown[] = [parsed.data.docId]
       let where = 'doc_id = ?'
-      if (parsed.data.page !== undefined) {
+      if (parsed.data.page != null) {
         where += ' AND loc_page = ?'
         params.push(parsed.data.page)
       } else if (parsed.data.range) {
