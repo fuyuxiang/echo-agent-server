@@ -94,6 +94,13 @@ const Schema = z.object({
   rateLimitLlmPerMin: z.coerce.number().int().nonnegative().default(20),
   rateLimitLoginPerMin: z.coerce.number().int().nonnegative().default(5),
 
+  // 受约束 Agentic RAG 的硬预算。即使模型要求继续搜索，也不能越过轮次、
+  // 查询数和单次推理超时，避免提示注入或坏计划造成无限循环与成本失控。
+  agenticMaxRounds: z.coerce.number().int().min(1).max(5).default(3),
+  agenticMaxQueries: z.coerce.number().int().min(1).max(20).default(8),
+  agenticReasoningTimeoutMs: z.coerce.number().int().min(1_000).max(120_000).default(15_000),
+  agenticGenerationTimeoutMs: z.coerce.number().int().min(5_000).max(180_000).default(60_000),
+
   logLevel: z.string().default('info')
 })
 
@@ -166,6 +173,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateLimitRetrievePerMin: env.ECHO_RATE_LIMIT_RETRIEVE,
     rateLimitLlmPerMin: env.ECHO_RATE_LIMIT_LLM,
     rateLimitLoginPerMin: env.ECHO_RATE_LIMIT_LOGIN,
+    agenticMaxRounds: env.ECHO_AGENTIC_MAX_ROUNDS,
+    agenticMaxQueries: env.ECHO_AGENTIC_MAX_QUERIES,
+    agenticReasoningTimeoutMs: env.ECHO_AGENTIC_REASONING_TIMEOUT_MS,
+    agenticGenerationTimeoutMs: env.ECHO_AGENTIC_GENERATION_TIMEOUT_MS,
     logLevel: env.ECHO_LOG_LEVEL
   })
 

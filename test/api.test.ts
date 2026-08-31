@@ -491,6 +491,7 @@ describe('健康检查', () => {
       mode: 'production',
       readinessReasons: [],
       chat: { configured: true, source: 'environment' },
+      agentic: { configured: true, maxRounds: 3, maxQueries: 8 },
       ocr: { configured: false },
       vlm: { configured: false }
     })

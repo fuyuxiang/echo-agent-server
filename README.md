@@ -12,6 +12,12 @@ Echo Agent 企业组织记忆服务端。仓库包含 Fastify API、SQLite 数�
 
 外部模型属于部署依赖，仓库不会伪造模型结果：未配置图片理解或音视频转写时，相应上传会同步返回 503；未配置 OCR 的扫描 PDF 会明确摄取失败；健康接口会列出准确的 `readinessReasons`。
 
+## Agentic RAG 问答闭环
+
+`POST /api/v1/knowledge/ask` 的 `auto` / `deep` 模式使用受约束的 Agentic 工作流：模型先以 JSON 规划必要事实和子查询，服务端在权限范围内执行混合检索；证据审查器发现缺口后最多补检 3 轮、总计 8 个查询。跨查询结果再次用 RRF 融合，并受全局文档多样性和 10k token 证据预算约束。显式 `fast` 保持单轮低延迟路径。
+
+答案由原子 claim 组成。每条 claim 必须绑定原文引用，并依次通过本地数字/单位/条件/否定硬校验和模型语义蕴含校验；验证器还会检查全部必要事实是否完整覆盖。一次受约束修复仍失败时返回原文抽取，不返回未经验证的生成结论。模型规划、审查或 JSON 输出不可用时会降级到确定性规则，权限过滤与拒答边界保持不变。
+
 ## 本地启动
 
 要求 Node.js 22；处理视频或超过 20MB 的音频还需系统安装 `ffmpeg`。
@@ -40,6 +46,7 @@ npm run dev
 | `ECHO_VLM_URL/KEY/MODEL` | 图片 caption multipart 接口与实际模型名。 |
 | `ECHO_TRANSCRIBE_URL/KEY/MODEL` | 完整的 OpenAI-compatible `/audio/transcriptions` 地址。 |
 | `ECHO_REQUIRE_CHAT/OCR/VLM/TRANSCRIPTION` | 指定生产就绪必须具备的能力。聊天默认必须，其余默认可选。 |
+| `ECHO_AGENTIC_MAX_ROUNDS/QUERIES/REASONING_TIMEOUT_MS/GENERATION_TIMEOUT_MS` | Agentic 检索最大轮次、总查询数、规划/审查与答案生成超时；默认 `3/8/15000/60000`。 |
 | `ECHO_ANTIVIRUS_*` | ClamAV 地址、超时及是否故障关闭。 |
 | `ECHO_BACKUP_DIR/INTERVAL_HOURS/RETENTION` | SQLite 在线备份目录、周期和保留份数。 |
 | `ECHO_CORS_ORIGINS` | 跨域白名单；留空只允许同源。 |

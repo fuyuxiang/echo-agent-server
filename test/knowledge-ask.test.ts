@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -77,6 +77,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.unstubAllGlobals()
   await app.close()
   db.close()
   rmSync(storageDir, { recursive: true, force: true })
@@ -223,6 +224,164 @@ describe('桌面端启动与 Agentic RAG', () => {
     }
     expect(final.insufficient).toBe(true)
     expect(final.citations).toHaveLength(0)
+  })
+
+  it('模型规划按证据缺口补检，并对完整 chunk 做逐 claim 语义校验', async () => {
+    const askedQueries: string[] = []
+    const longMaterial = `材料说明：${'背景信息'.repeat(400)}申请材料包括身份证和审批表。`
+    const makeChunk = (
+      chunkId: string,
+      docId: string,
+      title: string,
+      text: string,
+      score: number
+    ) => ({
+      chunkId,
+      docId,
+      docTitle: title,
+      text,
+      score,
+      scopeKind: 'org',
+      modality: 'text',
+      sourceType: 'markdown',
+      source: 'L3' as const,
+      citation: {
+        page: 1,
+        heading: title,
+        startMs: null,
+        endMs: null,
+        openUrl: `echo://doc/${docId}/page/1`
+      },
+      owner: null,
+      stale: false,
+      updatedAt: Date.now()
+    })
+    const agentRetriever = {
+      retrieve: async (_userId: string, request: { query: string }) => {
+        askedQueries.push(request.query)
+        const chunks = request.query.includes('申请需要哪些材料')
+          ? [makeChunk('c-material', 'd-material', '采购申请材料', longMaterial, 0.94)]
+          : [makeChunk('c-approval', 'd-approval', '采购审批制度', '采购申请至少需要两级审批。', 0.96)]
+        return {
+          chunks,
+          memories: [],
+          diagnostics: {
+            bm25Hits: 1,
+            vecHits: 1,
+            fusedCandidates: 1,
+            rerankMs: 5,
+            rerankSkipped: false,
+            totalMs: 10
+          }
+        }
+      }
+    } as unknown as Retriever
+
+    await app.close()
+    const agentCfg = testConfig({
+      storageDir,
+      chatModel: 'agent-reasoner',
+      chatBaseUrl: 'https://chat.test/v1',
+      chatKey: 'server-secret'
+    })
+    app = buildApp({
+      db,
+      cfg: agentCfg,
+      serveWeb: false,
+      overrides: { retriever: agentRetriever }
+    })
+    aliceToken = await login('alice', 'alice-password')
+
+    let assessmentCalls = 0
+    let generationEvidence = ''
+    vi.stubGlobal('fetch', vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as {
+        messages: Array<{ role: string; content: string }>
+      }
+      const system = body.messages[0]!.content
+      const user = body.messages[1]!.content
+      let content: unknown
+      if (system.includes('企业知识检索规划器')) {
+        content = {
+          mode: 'deep',
+          intent: 'multi_hop',
+          subQueries: ['完成采购申请需要几级审批以及提交哪些材料？'],
+          requiredFacts: ['审批级数', '申请材料']
+        }
+      } else if (system.includes('证据覆盖审查器')) {
+        assessmentCalls++
+        content = assessmentCalls === 1
+          ? {
+              sufficient: false,
+              confidence: 0.7,
+              coveredFacts: ['审批级数'],
+              missingFacts: ['申请材料'],
+              followUpQueries: ['申请需要哪些材料']
+            }
+          : {
+              sufficient: true,
+              confidence: 0.93,
+              coveredFacts: ['审批级数', '申请材料'],
+              missingFacts: [],
+              followUpQueries: []
+            }
+      } else if (system.includes('企业知识问答器')) {
+        generationEvidence = user
+        content = {
+          insufficient: false,
+          claims: [
+            { text: '采购申请至少需要两级审批。', citationIds: ['cit-1'] },
+            { text: '申请材料包括身份证和审批表。', citationIds: ['cit-2'] }
+          ]
+        }
+      } else if (system.includes('事实蕴含审查器')) {
+        content = {
+          answerComplete: true,
+          missingRequiredFacts: [],
+          verdicts: [
+            { claimIndex: 0, verdict: 'supported', reason: '' },
+            { claimIndex: 1, verdict: 'supported', reason: '' }
+          ]
+        }
+      } else {
+        throw new Error(`意外的模型调用: ${system}`)
+      }
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: JSON.stringify(content) } }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/knowledge/ask',
+      headers: bearer(aliceToken),
+      payload: { question: '完成采购申请需要几级审批以及提交哪些材料？', mode: 'auto' }
+    })
+    const parsed = events(response.body)
+    const final = parsed.get('final')?.[0] as {
+      answer: string
+      insufficient: boolean
+      verification: string
+      claims: Array<{ text: string; citationIds: string[] }>
+      agentic: { planner: string; assessor: string; rounds: number; queries: number }
+    }
+    expect(final.insufficient).toBe(false)
+    expect(final.verification).toBe('supported')
+    expect(final.claims).toHaveLength(2)
+    expect(final.answer).toContain('两级审批')
+    expect(final.answer).toContain('[cit-2]')
+    expect(final.agentic).toMatchObject({
+      planner: 'model',
+      assessor: 'model',
+      rounds: 2,
+      queries: 2
+    })
+    expect(askedQueries).toEqual([
+      '完成采购申请需要几级审批以及提交哪些材料？',
+      '申请需要哪些材料'
+    ])
+    // 关键事实位于 1200 字 UI quote 之后；生成模型必须看到完整 chunk。
+    expect(generationEvidence).toContain('申请材料包括身份证和审批表')
   })
 
   it('检索完成前就刷出 SSE 状态，客户端可以取消慢请求', async () => {

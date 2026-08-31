@@ -197,6 +197,13 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
           credentialError: chat.credentialError,
           required: deps.cfg.requireChat
         },
+        agentic: {
+          configured: chat.configured,
+          maxRounds: deps.cfg.agenticMaxRounds,
+          maxQueries: deps.cfg.agenticMaxQueries,
+          reasoningTimeoutMs: deps.cfg.agenticReasoningTimeoutMs,
+          generationTimeoutMs: deps.cfg.agenticGenerationTimeoutMs
+        },
         ocr: { configured: ocrConfigured },
         vlm: { configured: vlmConfigured, model: deps.vlmClient.model },
         transcription: {
