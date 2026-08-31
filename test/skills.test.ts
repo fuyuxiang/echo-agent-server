@@ -210,6 +210,22 @@ describe('Skill 个人/企业发布与同步', () => {
     const published = await submit(adminToken, orgScope, await skillZip('optional-guide'))
     const skillId = published.json().data.skillId
 
+    const catalog = await app.inject({
+      method: 'GET',
+      url: '/api/v1/skills',
+      headers: bearer(bobToken)
+    })
+    expect(catalog.json().data.find((item: { skillId: string }) => item.skillId === skillId).enabled)
+      .toBe(false)
+
+    const beforeInstall = await app.inject({
+      method: 'GET',
+      url: '/api/v1/skills/sync?cursor=0',
+      headers: bearer(bobToken)
+    })
+    expect(beforeInstall.json().data.visibleSkillIds).not.toContain(skillId)
+    expect(beforeInstall.json().data.upserts).toHaveLength(0)
+
     const disabled = await app.inject({
       method: 'PUT',
       url: `/api/v1/skills/${skillId}/preference`,
@@ -264,6 +280,13 @@ describe('Skill 个人/企业发布与同步', () => {
       '2.0.0'
     )
     expect(second.json().data.skillId).toBe(skillId)
+
+    await app.inject({
+      method: 'PUT',
+      url: `/api/v1/skills/${skillId}/preference`,
+      headers: bearer(bobToken),
+      payload: { enabled: true }
+    })
 
     const beforeRollback = await app.inject({
       method: 'GET',
@@ -340,12 +363,19 @@ describe('Skill 个人/企业发布与同步', () => {
     })
     expect(approved.statusCode).toBe(200)
 
+    const skillId = submitted.json().data.skillId
+    await app.inject({
+      method: 'PUT',
+      url: `/api/v1/skills/${skillId}/preference`,
+      headers: bearer(bobToken),
+      payload: { enabled: true }
+    })
+
     const first = await app.inject({
       method: 'GET',
       url: '/api/v1/skills/sync?cursor=0',
       headers: bearer(bobToken)
     })
-    const skillId = submitted.json().data.skillId
     expect(first.json().data.visibleSkillIds).toContain(skillId)
     const cursor = first.json().data.nextCursor
 

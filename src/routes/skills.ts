@@ -516,7 +516,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
               sf.allow_personal_override AS allowPersonalOverride,
               sf.updated_at AS updatedAt, s.id AS scopeId, s.name AS scopeName,
               s.kind AS scopeKind,
-              COALESCE(pref.enabled, 1) AS enabled
+              COALESCE(pref.enabled, 0) AS enabled
          FROM skill_families sf
          JOIN skill_versions sv ON sv.id = sf.current_version_id AND sv.state='approved'
          JOIN v_effective_scopes s ON s.id = sf.scope_id
@@ -651,7 +651,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
       `SELECT sf.id AS skillId, sf.scope_id AS scopeId, sf.slug, sf.name, sf.description,
               sf.state, sf.current_version_id AS currentVersionId, sf.mandatory,
               sf.allow_personal_override AS allowPersonalOverride,
-              COALESCE(pref.enabled,1) AS enabled, s.kind AS scopeKind, s.name AS scopeName
+              COALESCE(pref.enabled,0) AS enabled, s.kind AS scopeKind, s.name AS scopeName
          FROM skill_families sf
          JOIN v_effective_scopes s ON s.id=sf.scope_id
          LEFT JOIN skill_user_preferences pref
@@ -756,7 +756,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
          LEFT JOIN skill_user_preferences pref
            ON pref.skill_id=sf.id AND pref.user_id=?
         WHERE sf.state='active'
-          AND (sf.mandatory=1 OR COALESCE(pref.enabled,1)=1)
+          AND (sf.mandatory=1 OR COALESCE(pref.enabled,0)=1)
           AND sf.updated_at > ? AND sf.updated_at <= ?`
     ).all(claims.sub, claims.sub, cursor, nextCursor) as Record<string, unknown>[]
     const revoked = db.prepare(
@@ -775,7 +775,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
          JOIN v_user_scopes us ON us.scope_id=sf.scope_id AND us.user_id=?
          LEFT JOIN skill_user_preferences pref
            ON pref.skill_id=sf.id AND pref.user_id=?
-        WHERE sf.state='active' AND (sf.mandatory=1 OR COALESCE(pref.enabled,1)=1)
+        WHERE sf.state='active' AND (sf.mandatory=1 OR COALESCE(pref.enabled,0)=1)
         ORDER BY sf.id`
     ).all(claims.sub, claims.sub).map((row) => (row as { skillId: string }).skillId)
     const leaseHours = (db.prepare(
