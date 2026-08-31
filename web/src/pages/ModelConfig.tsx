@@ -36,10 +36,10 @@ export default function ModelConfig() {
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Alert
-        type="success"
+        type="warning"
         showIcon
-        message="API Key 只保存在服务端"
-        description="推理请求由服务端代理转发,密钥不会下发到员工电脑。这样离职或换机时无需逐台回收,撤销一次即全局生效。"
+        message="登录客户端会同步对话模型凭证"
+        description="组织成员在桌面端登录成功后，当前对话模型的 Base URL、模型名和 API Key 会写入其本地模型配置。更换密钥后，客户端需重新登录或重新启动以获取新配置。"
       />
 
       <Alert

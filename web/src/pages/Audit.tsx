@@ -14,6 +14,7 @@ const ACTIONS: Record<string, { label: string; color?: string }> = {
   approve: { label: '审核通过', color: 'green' },
   reject: { label: '审核驳回', color: 'orange' },
   config_change: { label: '配置变更', color: 'purple' },
+  model_config_download: { label: '模型配置下载', color: 'blue' },
   user_change: { label: '用户变更', color: 'purple' },
 }
 

@@ -14,6 +14,7 @@ export type AuditAction =
   | 'approve'
   | 'reject'
   | 'config_change'
+  | 'model_config_download'
   | 'user_change'
   | 'llm_chat'
   | 'conflict_resolve'

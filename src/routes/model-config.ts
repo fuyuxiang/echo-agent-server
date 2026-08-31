@@ -61,14 +61,7 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
     }
   }
 
-  /**
-   * 客户端只拿到非敏感字段。
-   *
-   * 明文 API Key 一旦下发,就散落在每台员工机器的内存、磁盘缓存和崩溃
-   * 日志里,且离职或换机后无法回收 —— 撤销一个 Key 需要通知所有客户端,
-   * 做不到。推理改由服务端代理,Key 只存服务端一处;副产品是成本归因与
-   * 限流有了统一落点。
-   */
+  /** 管理页面读取的脱敏模型配置。 */
   app.get('/api/v1/model-config', { preHandler: app.authenticate }, async (_req, reply) => {
     const row = db.prepare('SELECT * FROM model_configs WHERE id = ?').get(ROW_ID) as
       | Record<string, unknown>
@@ -105,7 +98,7 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
         embedDim: row.embed_dim,
         rerankModel: row.rerank_model,
         vlmModel: row.vlm_model,
-        // 刻意不含任何 Key 字段。客户端据 proxied=true 走 /api/v1/llm/chat。
+        // 管理页面使用此脱敏响应；桌面端从专用 client 路由同步完整凭证。
         hasCredential: !!chat.key,
         credentialError: chat.credentialError,
         source: chat.source,
@@ -115,6 +108,36 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
       })
     )
   })
+
+  /**
+   * 桌面端登录后的模型配置同步入口。
+   *
+   * 与管理页面的脱敏 GET 分开，避免管理页面无意间把明文凭证留在 DOM、
+   * 浏览器缓存或调试日志中。桌面端仅在组织登录完成后调用此接口，并将
+   * 返回值写入与用户手工模型相同的本地 provider/model 配置。
+   */
+  app.get(
+    '/api/v1/client/model-config',
+    { preHandler: app.authenticate },
+    async (req, reply) => {
+      const chat = resolveChatConfig(db, cfg)
+      app.audit(req, 'model_config_download', ROW_ID, {
+        configured: chat.configured,
+        model: chat.model,
+        provider: chat.provider
+      })
+      reply.header('cache-control', 'no-store')
+      return reply.send(ok({
+        configured: chat.configured,
+        chatProvider: chat.provider,
+        chatModel: chat.model,
+        chatBaseUrl: chat.baseUrl,
+        chatKey: chat.configured ? chat.key : null,
+        credentialError: chat.credentialError,
+        source: chat.source
+      }))
+    }
+  )
 
   app.put(
     '/api/v1/admin/model-config',

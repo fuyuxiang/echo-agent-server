@@ -220,7 +220,7 @@ export interface ModelConfig {
   rerankModel?: string | null
   vlmModel?: string | null
   hasCredential: boolean
-  // 服务端代理推理,Key 不下发客户端。
+  // 管理页面使用代理能力；桌面端另有登录后凭证同步入口。
   proxied: boolean
   updatedAt?: number
   /**

@@ -361,9 +361,8 @@ describe('模型配置', () => {
     ;({ app } = await setup())
   })
 
-  // 明文 Key 下发到客户端就无法回收:散落在每台机器的内存、磁盘缓存与
-  // 崩溃日志里,撤销要通知所有客户端。这条断言守住"Key 只存服务端"。
-  it('绝不下发明文 API Key', async () => {
+  // 管理页面继续使用脱敏接口；明文凭证只从桌面端专用同步入口返回。
+  it('管理页面接口不下发明文 API Key', async () => {
     const { accessToken } = await login(app, 'admin', 'admin-password')
     const put = await app.inject({
       method: 'PUT',
@@ -390,6 +389,50 @@ describe('模型配置', () => {
     expect(body).not.toContain('sk-super-secret-value')
     expect(res.json().data.hasCredential).toBe(true)
     expect(res.json().data.proxied).toBe(true)
+  })
+
+  it('登录成员可以从桌面端同步入口下载完整聊天模型配置', async () => {
+    const admin = await login(app, 'admin', 'admin-password')
+    const put = await app.inject({
+      method: 'PUT',
+      url: '/api/v1/admin/model-config',
+      headers: bearer(admin.accessToken),
+      payload: {
+        chatProvider: 'openai-compatible',
+        chatModel: 'glm-5',
+        chatBaseUrl: 'https://llm.example/v1/',
+        chatKey: 'sk-client-download',
+        embedModel: 'bge-m3',
+        embedDim: 1024
+      }
+    })
+    expect(put.statusCode).toBe(200)
+
+    const member = await login(app, 'alice', 'alice-password')
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/client/model-config',
+      headers: bearer(member.accessToken)
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['cache-control']).toBe('no-store')
+    expect(res.json().data).toMatchObject({
+      configured: true,
+      chatProvider: 'openai-compatible',
+      chatModel: 'glm-5',
+      chatBaseUrl: 'https://llm.example/v1',
+      chatKey: 'sk-client-download',
+      credentialError: false,
+      source: 'database'
+    })
+  })
+
+  it('未登录不能下载完整聊天模型配置', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/client/model-config'
+    })
+    expect(res.statusCode).toBe(401)
   })
 
   it('留空 chatKey 时保留原有凭证', async () => {
