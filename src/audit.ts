@@ -30,6 +30,8 @@ export type AuditAction =
   | 'document_review_download'
   | 'document_scan_failed'
   | 'knowledge_ask'
+  | 'knowledge_context'
+  | 'knowledge_feedback'
   | 'skill_submit'
   | 'skill_publish'
   | 'skill_approve'

@@ -26,6 +26,7 @@ import { registerDocumentSubmissionRoutes } from './routes/document-submissions.
 import { registerBootstrapRoutes } from './routes/bootstrap.js'
 import { probeAntivirus } from './security/content-scanner.js'
 import { registerKnowledgeAskRoutes } from './routes/knowledge-ask.js'
+import { registerKnowledgeContextRoutes } from './routes/knowledge-context.js'
 import { registerSkillRoutes } from './routes/skills.js'
 import { registerMcpRoutes } from './mcp.js'
 import { registerWeb } from './web.js'
@@ -234,6 +235,7 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   registerBootstrapRoutes(app)
   registerRetrieveRoutes(app)
   registerKnowledgeAskRoutes(app)
+  registerKnowledgeContextRoutes(app)
   registerModelConfigRoutes(app)
   registerAdminRoutes(app)
   registerDocsRoutes(app)

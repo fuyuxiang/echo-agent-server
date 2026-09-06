@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createDatabaseBackup, pruneDatabaseBackups } from '../src/db/backups.js'
 import { openDb } from '../src/db/index.js'
 import { testConfig } from '../src/config.js'
@@ -44,16 +45,27 @@ describe('SQLite 生产备份', () => {
     const dir = mkdtempSync(join(tmpdir(), 'echo-pre-migration-'))
     const dbPath = join(dir, 'echo.db')
     const backupDir = join(dir, 'backups')
-    const old = openDb({ path: dbPath })
-    old.pragma('user_version = 7')
+    // Build a genuine previous-version database. Opening the latest schema and
+    // merely lowering user_version leaves future columns in place and does not
+    // model a real upgrade.
+    const old = openDb({ path: dbPath, skipMigrate: true })
+    const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), '../src/db/migrations')
+    const previousMigrations = readdirSync(migrationsDir)
+      .filter((name) => name.endsWith('.sql'))
+      .sort()
+      .slice(0, -1)
+    for (const migration of previousMigrations) {
+      old.exec(readFileSync(join(migrationsDir, migration), 'utf8'))
+    }
+    old.pragma(`user_version = ${previousMigrations.length}`)
     old.close()
 
     const migrated = await openProductionDatabase(testConfig({ dbPath, backupDir }))
-    expect(migrated.pragma('user_version', { simple: true })).toBe(8)
+    expect(migrated.pragma('user_version', { simple: true })).toBe(previousMigrations.length + 1)
     const backups = readdirSync(backupDir).filter((name) => name.includes('pre-migration'))
     expect(backups).toHaveLength(1)
     const snapshot = openDb({ path: join(backupDir, backups[0]), skipMigrate: true })
-    expect(snapshot.pragma('user_version', { simple: true })).toBe(7)
+    expect(snapshot.pragma('user_version', { simple: true })).toBe(previousMigrations.length)
     expect(snapshot.pragma('integrity_check', { simple: true })).toBe('ok')
     snapshot.close()
     migrated.close()

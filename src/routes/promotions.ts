@@ -27,12 +27,22 @@ const MemoryPayload = z.object({
     .array(
       z.object({
         type: z.enum(['doc', 'qa', 'meeting', 'task']),
-        id: z.string(),
-        loc: z.string().optional()
+        id: z.string().min(1).max(256),
+        loc: z.string().max(1000).optional()
       })
     )
+    .max(20)
     .optional(),
-  validUntil: z.coerce.number().int().optional()
+  confidence: z.coerce.number().min(0).max(1).default(0.7),
+  observedAt: z.coerce.number().int().optional(),
+  validFrom: z.coerce.number().int().optional(),
+  validUntil: z.coerce.number().int().optional(),
+  supersedesId: z.string().max(256).optional(),
+  sourceSessionId: z.string().max(256).optional(),
+  sourceTaskId: z.string().max(256).optional(),
+  workspaceRef: z.string().max(1000).optional(),
+  outcome: z.string().max(2000).optional(),
+  sensitivity: z.coerce.number().int().min(0).max(3).default(0)
 })
 
 const DocumentPayload = z.object({
@@ -77,6 +87,23 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
     const body = shape.safeParse(payload)
     if (!body.success) {
       return reply.code(400).send(fail(4002, `内容格式错误: ${body.error.issues[0]?.message}`))
+    }
+    if (payloadType === 'memory') {
+      const memory = body.data as z.infer<typeof MemoryPayload>
+      if (memory.sensitivity > ctx.clearance) {
+        return reply.code(403).send(fail(4034, '不能提交高于自身密级的组织记忆'))
+      }
+      if (memory.validFrom && memory.validUntil && memory.validFrom > memory.validUntil) {
+        return reply.code(400).send(fail(4003, 'validFrom 不能晚于 validUntil'))
+      }
+      if (memory.supersedesId) {
+        const prior = db.prepare(
+          'SELECT scope_id AS scopeId FROM org_memories WHERE id=?'
+        ).get(memory.supersedesId) as { scopeId: string } | undefined
+        if (!prior || prior.scopeId !== targetScope || !canAccessScope(ctx, prior.scopeId)) {
+          return reply.code(400).send(fail(4004, '被替代记忆不存在或不在目标范围'))
+        }
+      }
     }
 
     const id = randomUUID()
@@ -212,25 +239,46 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
       let resultId: string
       if (promo.payloadType === 'memory') {
         const v = merged.data as z.infer<typeof MemoryPayload>
+        if (v.sensitivity > ctx.clearance) {
+          return reply.code(403).send(fail(4036, '不能批准高于自身密级的组织记忆'))
+        }
         resultId = randomUUID()
         const now = Date.now()
-        db.prepare(
-          `INSERT INTO org_memories (id, scope_id, kind, content, rationale, evidence,
-                                     author_id, confidence, status, valid_until,
-                                     created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,0.9,'active',?,?,?)`
-        ).run(
-          resultId,
-          promo.targetScope,
-          v.kind,
-          v.content,
-          v.rationale ?? null,
-          v.evidence ? JSON.stringify(v.evidence) : null,
-          promo.submitterId,
-          v.validUntil ?? null,
-          now,
-          now
-        )
+        db.transaction(() => {
+          db.prepare(
+            `INSERT INTO org_memories
+               (id, scope_id, kind, content, rationale, evidence, author_id,
+                confidence, status, observed_at, valid_from, valid_until,
+                supersedes_id, source_session_id, source_task_id, workspace_ref,
+                outcome, sensitivity, trust, created_at, updated_at)
+             VALUES (?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,'reviewed',?,?)`
+          ).run(
+            resultId,
+            promo.targetScope,
+            v.kind,
+            v.content,
+            v.rationale ?? null,
+            v.evidence ? JSON.stringify(v.evidence) : null,
+            promo.submitterId,
+            v.confidence,
+            v.observedAt ?? now,
+            v.validFrom ?? null,
+            v.validUntil ?? null,
+            v.supersedesId ?? null,
+            v.sourceSessionId ?? null,
+            v.sourceTaskId ?? null,
+            v.workspaceRef ?? null,
+            v.outcome ?? null,
+            v.sensitivity,
+            now,
+            now
+          )
+          if (v.supersedesId) {
+            db.prepare(
+              "UPDATE org_memories SET status='superseded', updated_at=? WHERE id=? AND scope_id=?"
+            ).run(now, v.supersedesId, promo.targetScope)
+          }
+        })()
       } else {
         const v = merged.data as z.infer<typeof DocumentPayload>
         const buf = Buffer.from(v.text, 'utf8')

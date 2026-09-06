@@ -7,10 +7,24 @@ import { loadAccessContext, canAccessScope } from '../auth/scopes.js'
 import { searchMemories } from '../kb/retrieve/recall.js'
 
 const PatchSchema = z.object({
+  kind: z.enum(['fact', 'decision', 'convention', 'pitfall', 'howto']).optional(),
   content: z.string().min(1).max(2000).optional(),
   rationale: z.string().max(2000).nullable().optional(),
+  evidence: z.array(z.object({
+    type: z.enum(['doc', 'qa', 'meeting', 'task']),
+    id: z.string().min(1).max(256),
+    loc: z.string().max(1000).optional()
+  })).max(20).nullable().optional(),
   confidence: z.coerce.number().min(0).max(1).optional(),
+  observedAt: z.coerce.number().int().nullable().optional(),
+  validFrom: z.coerce.number().int().nullable().optional(),
   validUntil: z.coerce.number().int().nullable().optional(),
+  sourceSessionId: z.string().max(256).nullable().optional(),
+  sourceTaskId: z.string().max(256).nullable().optional(),
+  workspaceRef: z.string().max(1000).nullable().optional(),
+  outcome: z.string().max(2000).nullable().optional(),
+  sensitivity: z.coerce.number().int().min(0).max(3).optional(),
+  trust: z.enum(['reported', 'reviewed', 'verified']).optional(),
   status: z.enum(['active', 'superseded', 'retired']).optional()
 })
 
@@ -19,12 +33,24 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
 
   app.get('/api/v1/memories', { preHandler: app.authenticate }, async (req, reply) => {
     const q = req.query as Record<string, string>
+    if (q.kind && !['fact', 'decision', 'convention', 'pitfall', 'howto'].includes(q.kind)) {
+      return reply.code(400).send(fail(4001, '记忆类型无效'))
+    }
+    if (q.status && !['active', 'superseded', 'retired'].includes(q.status)) {
+      return reply.code(400).send(fail(4001, '记忆状态无效'))
+    }
+    if ((q.scope?.length ?? 0) > 256 || (q.q?.length ?? 0) > 2000) {
+      return reply.code(400).send(fail(4001, '查询参数过长'))
+    }
     const claims = (req as AuthedRequest).claims
     const ctx = loadAccessContext(db, claims.sub)
     if (ctx.scopeIds.length === 0) return reply.send(ok([]))
 
-    const where = [`m.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})`]
-    const params: unknown[] = [...ctx.scopeIds]
+    const where = [
+      `m.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})`,
+      'm.sensitivity <= ?'
+    ]
+    const params: unknown[] = [...ctx.scopeIds, ctx.clearance]
     if (q.kind) { where.push('m.kind = ?'); params.push(q.kind) }
     if (q.scope) { where.push('m.scope_id = ?'); params.push(q.scope) }
     where.push(q.status ? 'm.status = ?' : "m.status = 'active'")
@@ -34,7 +60,11 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
     const rows = db
       .prepare(
         `SELECT m.id, m.kind, m.content, m.rationale, m.evidence, m.confidence,
-                m.hit_count AS hitCount, m.valid_until AS validUntil, m.status,
+                m.hit_count AS hitCount, m.observed_at AS observedAt,
+                m.valid_from AS validFrom, m.valid_until AS validUntil,
+                m.supersedes_id AS supersedesId, m.source_session_id AS sourceSessionId,
+                m.source_task_id AS sourceTaskId, m.workspace_ref AS workspaceRef,
+                m.outcome, m.sensitivity, m.trust, m.status,
                 m.created_at AS createdAt, m.updated_at AS updatedAt,
                 s.kind AS scopeKind, s.name AS scopeName, s.id AS scopeId,
                 u.display_name AS authorName
@@ -45,8 +75,12 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
           ORDER BY m.hit_count DESC, m.updated_at DESC
           LIMIT 200`
       )
-      .all(...params)
-    return reply.send(ok(rows))
+      .all(...params) as Array<Record<string, unknown> & { evidence?: string | null }>
+    return reply.send(ok(rows.map((row) => ({
+      ...row,
+      evidence: parseEvidence(row.evidence),
+      stale: typeof row.validUntil === 'number' && row.validUntil < Date.now()
+    }))))
   })
 
   app.post('/api/v1/memories/search', { preHandler: app.authenticate }, async (req, reply) => {
@@ -71,20 +105,47 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       const ctx = loadAccessContext(db, claims.sub)
 
       const mem = db
-        .prepare('SELECT scope_id AS scopeId FROM org_memories WHERE id = ?')
-        .get(id) as { scopeId: string } | undefined
+        .prepare(
+          'SELECT scope_id AS scopeId, valid_from AS validFrom, valid_until AS validUntil FROM org_memories WHERE id = ?'
+        )
+        .get(id) as { scopeId: string; validFrom: number | null; validUntil: number | null } | undefined
       if (!mem) return reply.code(404).send(fail(4041, '记忆不存在'))
       if (claims.role !== 'admin' && !canAccessScope(ctx, mem.scopeId)) {
         return reply.code(403).send(fail(4035, '无权修改该记忆'))
       }
 
       const v = parsed.data
+      if (v.sensitivity !== undefined && v.sensitivity > ctx.clearance) {
+        return reply.code(403).send(fail(4036, '不能设置高于自身密级的组织记忆'))
+      }
+      const effectiveValidFrom = v.validFrom !== undefined ? v.validFrom : mem.validFrom
+      const effectiveValidUntil = v.validUntil !== undefined ? v.validUntil : mem.validUntil
+      if (
+        effectiveValidFrom !== null
+        && effectiveValidUntil !== null
+        && effectiveValidFrom > effectiveValidUntil
+      ) {
+        return reply.code(400).send(fail(4002, 'validFrom 不能晚于 validUntil'))
+      }
       const sets: string[] = []
       const params: unknown[] = []
+      if (v.kind !== undefined) { sets.push('kind = ?'); params.push(v.kind) }
       if (v.content !== undefined) { sets.push('content = ?'); params.push(v.content) }
       if (v.rationale !== undefined) { sets.push('rationale = ?'); params.push(v.rationale) }
+      if (v.evidence !== undefined) {
+        sets.push('evidence = ?')
+        params.push(v.evidence === null ? null : JSON.stringify(v.evidence))
+      }
       if (v.confidence !== undefined) { sets.push('confidence = ?'); params.push(v.confidence) }
+      if (v.observedAt !== undefined) { sets.push('observed_at = ?'); params.push(v.observedAt) }
+      if (v.validFrom !== undefined) { sets.push('valid_from = ?'); params.push(v.validFrom) }
       if (v.validUntil !== undefined) { sets.push('valid_until = ?'); params.push(v.validUntil) }
+      if (v.sourceSessionId !== undefined) { sets.push('source_session_id = ?'); params.push(v.sourceSessionId) }
+      if (v.sourceTaskId !== undefined) { sets.push('source_task_id = ?'); params.push(v.sourceTaskId) }
+      if (v.workspaceRef !== undefined) { sets.push('workspace_ref = ?'); params.push(v.workspaceRef) }
+      if (v.outcome !== undefined) { sets.push('outcome = ?'); params.push(v.outcome) }
+      if (v.sensitivity !== undefined) { sets.push('sensitivity = ?'); params.push(v.sensitivity) }
+      if (v.trust !== undefined) { sets.push('trust = ?'); params.push(v.trust) }
       if (v.status !== undefined) { sets.push('status = ?'); params.push(v.status) }
       if (sets.length === 0) return reply.send(ok({ updated: false }))
 
@@ -295,4 +356,14 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       return reply.send(ok({ resolution: parsed.data.resolution, resultId }))
     }
   )
+}
+
+function parseEvidence(value: string | null | undefined): unknown[] {
+  if (!value) return []
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
 }

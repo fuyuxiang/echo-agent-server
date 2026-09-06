@@ -1,5 +1,6 @@
 import type { DB } from '../../db/index.js'
 import type { AccessContext } from '../../auth/scopes.js'
+import { lexicalOverlapScore } from '../../models/reranker.js'
 import { buildFtsQuery } from './text.js'
 
 export interface Candidate {
@@ -190,8 +191,25 @@ export interface MemoryHit {
   id: string
   kind: string
   content: string
+  scopeId: string
   scopeKind: string
+  scopeName: string
   confidence: number
+  /** Query-to-memory coverage, distinct from the memory's epistemic confidence. */
+  relevanceScore: number
+  rationale: string | null
+  evidence: unknown[]
+  observedAt: number | null
+  validFrom: number | null
+  validUntil: number | null
+  supersedesId: string | null
+  sourceSessionId: string | null
+  sourceTaskId: string | null
+  workspaceRef: string | null
+  outcome: string | null
+  trust: 'reported' | 'reviewed' | 'verified'
+  updatedAt: number
+  stale: boolean
 }
 
 /**
@@ -202,7 +220,8 @@ export function searchMemories(
   db: DB,
   query: string,
   ctx: AccessContext,
-  limit = 5
+  limit = 5,
+  workspaceRef?: string
 ): MemoryHit[] {
   if (ctx.scopeIds.length === 0) return []
   const match = buildFtsQuery(query)
@@ -210,28 +229,86 @@ export function searchMemories(
 
   const placeholders = ctx.scopeIds.map(() => '?').join(',')
   const now = Date.now()
+  const candidateLimit = Math.min(100, Math.max(25, limit * 5))
 
   const sql = `
-    SELECT m.id, m.kind, m.content, s.kind AS scopeKind, m.confidence
+    SELECT m.id, m.kind, m.content, m.scope_id AS scopeId,
+           s.kind AS scopeKind, s.name AS scopeName, m.confidence,
+           m.rationale, m.evidence, m.observed_at AS observedAt,
+           m.valid_from AS validFrom, m.valid_until AS validUntil,
+           m.supersedes_id AS supersedesId,
+           m.source_session_id AS sourceSessionId,
+           m.source_task_id AS sourceTaskId,
+           m.workspace_ref AS workspaceRef, m.outcome, m.trust,
+           m.updated_at AS updatedAt
       FROM org_memories_fts f
       JOIN org_memories m ON m.id=f.memory_id
       JOIN v_effective_scopes s ON s.id = m.scope_id
      WHERE org_memories_fts MATCH ?
        AND m.scope_id IN (${placeholders})
+       AND m.sensitivity <= ?
        AND m.status = 'active'
+       AND (m.valid_from IS NULL OR m.valid_from <= ?)
+       ${workspaceRef ? 'AND (m.workspace_ref IS NULL OR m.workspace_ref = ?)' : ''}
      ORDER BY
        CASE WHEN m.valid_until IS NOT NULL AND m.valid_until < ? THEN 1 ELSE 0 END,
+       ${workspaceRef
+         ? 'CASE WHEN m.workspace_ref = ? THEN 0 WHEN m.workspace_ref IS NULL THEN 1 ELSE 2 END,'
+         : ''}
        bm25(org_memories_fts),
+       CASE m.trust WHEN 'verified' THEN 0 WHEN 'reviewed' THEN 1 ELSE 2 END,
        m.confidence DESC,
        m.hit_count DESC
      LIMIT ?
   `
-  return db
+  const rows = db
     .prepare(sql)
     .all(
       match,
       ...ctx.scopeIds,
+      ctx.clearance,
       now,
-      limit
-    ) as MemoryHit[]
+      ...(workspaceRef ? [workspaceRef] : []),
+      now,
+      ...(workspaceRef ? [workspaceRef] : []),
+      candidateLimit
+    ) as Array<Omit<MemoryHit, 'evidence' | 'stale' | 'relevanceScore'> & {
+      evidence: string | null
+    }>
+  const trustWeight = { reported: 0, reviewed: 0.02, verified: 0.04 }
+  return rows
+    .map((row) => ({
+      ...row,
+      evidence: parseEvidence(row.evidence),
+      stale: row.validUntil !== null && row.validUntil < now,
+      relevanceScore: lexicalOverlapScore(
+        query,
+        [row.content, row.rationale, row.outcome].filter(Boolean).join('\n')
+      )
+    }))
+    // FTS uses broad OR recall. Requiring meaningful coverage prevents one
+    // accidental bigram from turning a high-confidence but unrelated memory
+    // into task guidance.
+    .filter((row) => row.relevanceScore >= 0.18)
+    .sort((a, b) => {
+      const freshness = Number(a.stale) - Number(b.stale)
+      if (freshness) return freshness
+      const score = (memory: MemoryHit): number =>
+        memory.relevanceScore
+        + (workspaceRef && memory.workspaceRef === workspaceRef ? 0.12 : 0)
+        + trustWeight[memory.trust]
+        + memory.confidence * 0.04
+      return score(b) - score(a)
+    })
+    .slice(0, limit)
+}
+
+function parseEvidence(value: string | null): unknown[] {
+  if (!value) return []
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
 }

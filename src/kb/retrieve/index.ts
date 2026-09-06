@@ -33,6 +33,8 @@ export interface RetrieveRequest {
   scopes?: Array<'personal' | 'org' | 'team'>
   /** 显式 scope id 子集；只能从实时授权范围中继续收窄。 */
   scopeIds?: string[]
+  /** Current repository/project identity used to prioritize applicable experience. */
+  workspaceRef?: string
 }
 
 export interface Citation {
@@ -222,7 +224,7 @@ export class Retriever {
       diverse.slice(0, limit),
       req.tokenBudget ?? DEFAULT_TOKEN_BUDGET
     )
-    const memories = searchMemories(this.deps.db, req.query, ctx, 5)
+    const memories = searchMemories(this.deps.db, req.query, ctx, 5, req.workspaceRef)
 
     const response: RetrieveResponse = {
       chunks,
