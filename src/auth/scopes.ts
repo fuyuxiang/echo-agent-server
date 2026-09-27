@@ -36,6 +36,15 @@ export function loadAccessContext(db: DB, userId: string): AccessContext {
   }
 }
 
+/** Admin console may manage organization and team scopes, never another user's private scope. */
+export function loadManagementContext(db: DB, userId: string, role: string): AccessContext {
+  const ctx = loadAccessContext(db, userId)
+  if (role !== 'admin') return ctx
+  const shared = db.prepare("SELECT id FROM v_effective_scopes WHERE kind IN ('org','team')")
+    .all() as { id: string }[]
+  return { ...ctx, scopeIds: [...new Set([...ctx.scopeIds, ...shared.map((row) => row.id)])] }
+}
+
 /**
  * 判断用户能否访问指定 scope。用于文档下载、单条读取等按 id 的接口 ——
  * 这些接口不走检索链路,必须单独校验,否则可以靠猜 id 绕过 scope 限制。
@@ -55,6 +64,7 @@ export function canPublishDocument(
     'SELECT kind, owner_user_id AS ownerUserId FROM v_effective_scopes WHERE id = ?'
   ).get(scopeId) as { kind: string; ownerUserId: string | null } | undefined
   if (!scope) return false
+  if (scope.kind === 'personal' && scope.ownerUserId !== ctx.userId) return false
   if (role === 'admin') return true
   if (!canAccessScope(ctx, scopeId)) return false
   if (scope.kind === 'personal') return scope.ownerUserId === ctx.userId

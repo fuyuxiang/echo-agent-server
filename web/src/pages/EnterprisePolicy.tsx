@@ -33,7 +33,6 @@ export default function EnterprisePolicy(): JSX.Element {
         <Form.Item label="允许本地知识"><Switch checked={policy.allowLocalKnowledge} onChange={(value) => update('allowLocalKnowledge', value)} /></Form.Item>
         <Form.Item label="允许个人云知识"><Switch checked={policy.allowPersonalCloud} onChange={(value) => update('allowPersonalCloud', value)} /></Form.Item>
         <Form.Item label="允许提交 Skill"><Switch checked={policy.allowSkillSubmission} onChange={(value) => update('allowSkillSubmission', value)} /></Form.Item>
-        <Form.Item label="允许企业内容离线"><Switch checked={policy.offlineEnterpriseContent} onChange={(value) => update('offlineEnterpriseContent', value)} /></Form.Item>
         <Form.Item label="Skill 租约（小时）"><InputNumber min={1} max={168} value={policy.managedSkillLeaseHours} onChange={(value) => update('managedSkillLeaseHours', value ?? 24)} /></Form.Item>
         <Form.Item wrapperCol={{ offset: 8 }}><Button type="primary" loading={saving} onClick={() => void save()}>签名发布</Button></Form.Item>
       </Form>

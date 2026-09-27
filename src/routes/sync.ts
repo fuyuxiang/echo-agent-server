@@ -103,6 +103,12 @@ export function registerSyncRoutes(app: FastifyInstance): void {
 
     const claims = (req as AuthedRequest).claims
     const ctx = loadAccessContext(db, claims.sub)
+    const offlinePolicy = db.prepare(
+      "SELECT offline_enterprise AS enabled FROM enterprise_policy WHERE id='default'"
+    ).get() as { enabled: number } | undefined
+    if (offlinePolicy?.enabled !== 1) {
+      return reply.code(403).send(fail(4035, '企业内容离线同步未启用'))
+    }
 
     if (ctx.scopeIds.length === 0) {
       const nextCursor = encodeCursor({ v: 2, since: now })

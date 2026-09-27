@@ -199,6 +199,57 @@ describe('文档个人/组织发布流', () => {
     expect(minePage.json().data.total).toBe(0)
   })
 
+  it('重复上传明确返回跳过，且共享文档维护人可以提交新版本', async () => {
+    const { db, app, teamScope } = await setup()
+    const aliceToken = await login(app, 'alice', 'alice-password')
+    const original = await submit(app, aliceToken, teamScope, '# 发布规范\n\n初版内容')
+    expect(original.statusCode).toBe(200)
+    const duplicate = await submit(app, aliceToken, teamScope, '# 发布规范\n\n初版内容')
+    expect(duplicate.json().data).toMatchObject({ state: 'duplicate', dedup: true })
+    expect(db.prepare('SELECT COUNT(*) AS n FROM documents').get()).toMatchObject({ n: 1 })
+    await drain({ db, cfg, embedder: createEmbedder(cfg) })
+
+    const versionBody = multipartBody({}, { name: 'service.md', content: '# 发布规范\n\n第二版内容' })
+    const version = await app.inject({
+      method: 'POST',
+      url: `/api/v1/docs/${original.json().data.docId}/new-version`,
+      headers: { ...bearer(aliceToken), ...versionBody.headers },
+      payload: versionBody.payload
+    })
+    expect(version.statusCode).toBe(200)
+    expect(version.json().data.version).toBe(2)
+  })
+
+  it('文档内容分页可继续读取，管理员可管理共享文档但看不到他人个人文档', async () => {
+    const { db, app, teamScope, aliceId } = await setup()
+    const aliceToken = await login(app, 'alice', 'alice-password')
+    const adminToken = await login(app, 'admin', 'admin-password')
+    const shared = await submit(app, aliceToken, teamScope, '# 大型文档\n\n共享内容')
+    const privateDoc = await submit(app, aliceToken, `personal-${aliceId}`, '# 私人文档\n\n个人内容')
+    await drain({ db, cfg, embedder: createEmbedder(cfg) })
+    const docId = shared.json().data.docId as string
+    db.prepare('DELETE FROM chunks WHERE doc_id=?').run(docId)
+    const insert = db.prepare(
+      `INSERT INTO chunks (id,doc_id,scope_id,sensitivity,seq,text,created_at)
+       VALUES (?,?,?,0,?,?,?)`
+    )
+    for (let seq = 0; seq < 201; seq++) insert.run(`page-${seq}`, docId, teamScope, seq, `内容 ${seq}`, Date.now())
+    const first = await app.inject({ method: 'POST', url: '/api/v1/docs/fetch', headers: bearer(aliceToken), payload: { docId } })
+    expect(first.json().data.chunks).toHaveLength(200)
+    expect(first.json().data).toMatchObject({ hasMore: true, nextSeq: 199 })
+    const next = await app.inject({ method: 'POST', url: '/api/v1/docs/fetch', headers: bearer(aliceToken), payload: { docId, afterSeq: 199 } })
+    expect(next.json().data.chunks).toHaveLength(1)
+    expect(next.json().data.hasMore).toBe(false)
+
+    const managed = await app.inject({ method: 'GET', url: '/api/v1/docs?view=manage', headers: bearer(adminToken) })
+    expect(managed.json().data.items.some((item: { id: string }) => item.id === docId)).toBe(true)
+    expect(managed.json().data.items.some((item: { id: string }) => item.id === privateDoc.json().data.docId)).toBe(false)
+    const adminRaw = await app.inject({ method: 'GET', url: `/api/v1/docs/${docId}/raw`, headers: bearer(adminToken) })
+    expect(adminRaw.statusCode).toBe(200)
+    const privateRaw = await app.inject({ method: 'GET', url: `/api/v1/docs/${privateDoc.json().data.docId}/raw`, headers: bearer(adminToken) })
+    expect(privateRaw.statusCode).toBe(404)
+  })
+
   it('个人文档可以发布副本到自己的团队，扫描后自动进入索引', async () => {
     const { db, app, teamScope, aliceId } = await setup()
     const aliceToken = await login(app, 'alice', 'alice-password')

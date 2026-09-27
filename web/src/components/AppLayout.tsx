@@ -30,12 +30,11 @@ export default function AppLayout() {
   useEffect(() => {
     const tick = async (): Promise<void> => {
       try {
-        const [promotions, documents, skills] = await Promise.all([
+        const [promotions, skills] = await Promise.all([
           api.listPromotions('pending'),
-          api.listDocumentSubmissions('pending'),
           api.listSkillSubmissions('pending'),
         ])
-        setPendingCount(promotions.length + documents.length + skills.length)
+        setPendingCount(promotions.length + skills.length)
       } catch {
         // 静默失败:菜单角标不值得打断使用
       }
@@ -46,25 +45,34 @@ export default function AppLayout() {
   }, [loc.pathname])
 
   const items = [
-    { key: '/documents', icon: <FileTextOutlined />, label: '文档管理' },
     {
       key: '/review',
       icon: <AuditOutlined />,
-      label: pendingCount > 0 ? <Badge count={pendingCount} offset={[10, 0]}>发布审核</Badge> : '发布审核',
+      label: pendingCount > 0 ? <Badge count={pendingCount} offset={[10, 0]}>待办审核</Badge> : '待办审核',
     },
-    { key: '/memories', icon: <BulbOutlined />, label: '组织记忆' },
-    { key: '/search', icon: <SearchOutlined />, label: '检索自测' },
-    { key: '/quality', icon: <DashboardOutlined />, label: '质量看板' },
+    { key: 'content', icon: <FileTextOutlined />, label: '知识内容', children: [
+      { key: '/documents', label: '文档' },
+      { key: '/memories', icon: <BulbOutlined />, label: '组织记忆' },
+    ] },
     ...(isAdmin
       ? [
-          { type: 'divider' as const },
-          { key: '/users', icon: <UserOutlined />, label: '用户管理' },
-          { key: '/groups', icon: <TeamOutlined />, label: '分组管理' },
-          { key: '/model-config', icon: <SettingOutlined />, label: '模型配置' },
-          { key: '/audit', icon: <SafetyOutlined />, label: '审计日志' },
-          { key: '/enterprise-policy', icon: <SafetyOutlined />, label: '企业策略' },
+          { key: 'members', icon: <TeamOutlined />, label: '成员与权限', children: [
+            { key: '/users', icon: <UserOutlined />, label: '用户' },
+            { key: '/groups', label: '分组' },
+          ] },
+          { key: 'settings', icon: <SettingOutlined />, label: '组织设置', children: [
+            { key: '/model-config', label: '模型配置' },
+            { key: '/enterprise-policy', label: '客户端策略' },
+          ] },
         ]
       : []),
+    { key: 'diagnostics', icon: <SearchOutlined />, label: '运行诊断', children: [
+      { key: '/search', label: '检索自测' },
+      ...(isAdmin ? [
+        { key: '/quality', icon: <DashboardOutlined />, label: '质量看板' },
+        { key: '/audit', icon: <SafetyOutlined />, label: '审计日志' },
+      ] : []),
+    ] },
   ]
 
   const logout = async (): Promise<void> => {
@@ -97,6 +105,7 @@ export default function AppLayout() {
         <Menu
           theme="dark"
           mode="inline"
+          defaultOpenKeys={['content', 'diagnostics', ...(isAdmin ? ['members', 'settings'] : [])]}
           selectedKeys={[loc.pathname]}
           items={items}
           onClick={(e) => nav(e.key)}

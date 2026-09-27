@@ -7,6 +7,7 @@ import type { DB } from './db/index.js'
 import { loadAccessContext, canAccessScope, canAccessDocument } from './auth/scopes.js'
 import { type JwtClaims } from './auth/jwt.js'
 import { Retriever } from './kb/retrieve/index.js'
+import { readDocumentChunks } from './dao/document-content.js'
 import type { RetrieverDeps } from './kb/retrieve/index.js'
 
 /**
@@ -198,9 +199,10 @@ function buildServer(deps: McpDeps, userId: string): McpServer {
     '按 id 取组织文档的完整内容或指定页。仅可访问当前用户有权看的文档。',
     {
       doc_id: z.string().min(1).describe('文档 id'),
-      page: z.number().int().min(1).optional().describe('页码(可选)')
+      page: z.number().int().min(1).optional().describe('页码(可选)'),
+      after_seq: z.number().int().min(0).optional().describe('继续读取时传上次返回的 nextSeq')
     },
-    async ({ doc_id, page }) => {
+    async ({ doc_id, page, after_seq }) => {
       const ctx = loadAccessContext(deps.db, userId)
       if (!canAccessDocument(deps.db, ctx, doc_id)) {
         return { isError: true, content: [{ type: 'text' as const, text: '文档不存在或无权访问' }] }
@@ -215,15 +217,13 @@ function buildServer(deps: McpDeps, userId: string): McpServer {
         return { isError: true, content: [{ type: 'text' as const, text: '文档不存在' }] }
       }
 
-      const sql = page
-        ? 'SELECT text, seq FROM chunks WHERE doc_id = ? AND (loc_page = ? OR loc_page IS NULL) ORDER BY seq'
-        : 'SELECT text, seq FROM chunks WHERE doc_id = ? ORDER BY seq'
-      const params = page ? [doc_id, page] : [doc_id]
-      const rows = deps.db.prepare(sql).all(...params) as { text: string; seq: number }[]
-      const body = rows.map((r) => r.text).join('\n\n')
+      const { chunks, hasMore, nextSeq } = readDocumentChunks(deps.db, doc_id, {
+        page, afterSeq: after_seq
+      })
+      const body = chunks.map((r) => r.text).join('\n\n')
       return {
         content: [
-          { type: 'text' as const, text: body || `${row.title}\n\n(暂无内容)` }
+          { type: 'text' as const, text: `${body || `${row.title}\n\n(暂无内容)`}${hasMore ? `\n\n[后续内容：nextSeq=${nextSeq}，请继续调用 after_seq]` : ''}` }
         ]
       }
     }

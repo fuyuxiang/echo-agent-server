@@ -28,12 +28,10 @@ export default function Review() {
         onChange={setQueue}
         items={[
           { key: 'knowledge', label: '知识条目' },
-          { key: 'documents', label: '文档发布' },
           { key: 'skills', label: 'Skill 发布' },
         ]}
       />
       {queue === 'knowledge' && <PromotionReview />}
-      {queue === 'documents' && <DocumentSubmissionReview />}
       {queue === 'skills' && <SkillSubmissionReview />}
     </>
   )
@@ -215,7 +213,7 @@ async function saveReviewFile(load: () => Promise<Blob>, fileName: string): Prom
   URL.revokeObjectURL(url)
 }
 
-function DocumentSubmissionReview(): JSX.Element {
+export function DocumentSubmissionReview(): JSX.Element {
   const [state, setState] = useState<PromotionState>('pending')
   const [items, setItems] = useState<DocumentSubmission[]>([])
   const [loading, setLoading] = useState(false)

@@ -136,12 +136,15 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       return reply.code(403).send(fail(4033, '没有目标范围的文档发布权限'))
     }
     const existing = db.prepare(
-      `SELECT id,status FROM documents
-        WHERE scope_id=? AND content_hash=? AND status!='archived'
+      `SELECT id,status,sensitivity FROM documents
+        WHERE scope_id=? AND content_hash=? AND status NOT IN ('archived','failed')
         ORDER BY created_at DESC LIMIT 1`
-    ).get(target.id, source.contentHash) as { id: string; status: string } | undefined
+    ).get(target.id, source.contentHash) as { id: string; status: string; sensitivity: number } | undefined
     if (existing) return reply.send(ok({
-      submissionId: null, docId: existing.id, state: 'approved',
+      submissionId: null,
+      docId: existing.status === 'ready' && existing.sensitivity <= ctx.clearance
+        ? existing.id : null,
+      state: 'duplicate',
       documentStatus: existing.status, dedup: true
     }))
     const bytes = await storage.get(source.storageKey)
@@ -269,16 +272,17 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       const contentHash = createHash('sha256').update(buf).digest('hex')
       const published = db
         .prepare(
-          `SELECT id, status FROM documents
-            WHERE scope_id = ? AND content_hash = ? AND status != 'archived'
+          `SELECT id, status, sensitivity FROM documents
+            WHERE scope_id = ? AND content_hash = ? AND status NOT IN ('archived','failed')
             ORDER BY created_at DESC LIMIT 1`
         )
-        .get(targetScope, contentHash) as { id: string; status: string } | undefined
+        .get(targetScope, contentHash) as { id: string; status: string; sensitivity: number } | undefined
       if (published) {
         return reply.send(ok({
           submissionId: null,
-          docId: published.id,
-          state: 'approved',
+          docId: published.status === 'ready' && published.sensitivity <= ctx.clearance
+            ? published.id : null,
+          state: 'duplicate',
           documentStatus: published.status,
           dedup: true
         }))
@@ -292,7 +296,6 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       const tags = readTags(fields.tags?.value)
       // Legacy pending submissions remain reviewable, but new uploads publish
       // immediately after the technical scan when the scope grants write access.
-      const autoApprove = true
       const sourceDocumentId = fields.sourceDocumentId?.value?.trim() || null
       if (sourceDocumentId) {
         const source = db.prepare(
@@ -376,7 +379,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       ).run(JSON.stringify(report), completedAt, id)
 
       let docId: string | null = null
-      if (autoApprove) {
+      {
         const publishedKey = await storage.move(quarantineKey, 'published/documents')
         submission.storageKey = publishedKey
         submission.state = 'approved'
@@ -390,7 +393,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
         ).run(publishedKey, publishedKey, claims.sub, completedAt, docId, id)
       }
 
-      app.audit(req, autoApprove ? 'upload' : 'document_submit', id, {
+      app.audit(req, 'upload', id, {
         targetScope,
         scopeKind: scope.kind,
         docId,
@@ -399,7 +402,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       return reply.send(ok({
         submissionId: id,
         docId,
-        state: autoApprove ? 'approved' : 'pending',
+        state: 'approved',
         scanStatus: 'passed',
         scanReport: report,
         documentStatus: docId ? 'pending' : null,

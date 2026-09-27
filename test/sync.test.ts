@@ -30,6 +30,7 @@ interface Ctx {
 
 async function setup(): Promise<Ctx> {
   const db = openDb({ path: ':memory:' })
+  db.prepare("UPDATE enterprise_policy SET offline_enterprise=1 WHERE id='default'").run()
   const orgScope = ensureOrgScope(db)
   const now = Date.now()
   db.prepare("INSERT INTO groups VALUES ('g_fin','财务部',NULL,'',?)").run(now)
@@ -111,6 +112,13 @@ afterEach(() => {
 })
 
 describe('增量同步', () => {
+  it('企业未开启离线内容时拒绝同步', async () => {
+    const ctx = await setup()
+    const token = await login(ctx.app, 'alice', 'alice-password')
+    ctx.db.prepare("UPDATE enterprise_policy SET offline_enterprise=0 WHERE id='default'").run()
+    const denied = await ctx.app.inject({ method: 'GET', url: '/api/v1/sync', headers: bearer(token) })
+    expect(denied.statusCode).toBe(403)
+  })
   it('下发可见文档及其 chunk', async () => {
     const ctx = await setup()
     await addDoc(ctx, ctx.orgScope, '员工手册', '公司实行弹性工作制,核心时间十点到四点。')

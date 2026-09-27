@@ -80,7 +80,22 @@ export const listDocs = (params: {
   tag?: string
   page?: number
   size?: number
+  view?: 'accessible' | 'manage'
 }): Promise<DocListResult> => client.get('/api/v1/docs', { params })
+
+export interface DocumentContentPage {
+  docId: string
+  title: string
+  text: string
+  hasMore: boolean
+  nextSeq: number | null
+}
+
+export const getDocumentContent = (id: string, afterSeq?: number): Promise<DocumentContentPage> =>
+  client.get(`/api/v1/docs/${encodeURIComponent(id)}/content`, { params: { afterSeq } })
+
+export const downloadDocRaw = (id: string): Promise<Blob> =>
+  client.get(`/api/v1/docs/${encodeURIComponent(id)}/raw`, { responseType: 'blob' })
 
 export const getDoc = (id: string): Promise<DocumentItem & { tags: string[] }> =>
   client.get(`/api/v1/docs/${id}`)

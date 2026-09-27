@@ -3,7 +3,8 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { ok, fail } from '../reply.js'
 import { requireCurator, type AuthedRequest } from '../auth/jwt.js'
-import { loadAccessContext, canAccessScope, canAccessDocument } from '../auth/scopes.js'
+import { loadAccessContext, loadManagementContext, canAccessScope, canAccessDocument, canPublishDocument } from '../auth/scopes.js'
+import { readDocumentChunks } from '../dao/document-content.js'
 import { enqueueIngest } from '../kb/ingest/worker.js'
 import { deleteChunks } from '../kb/ingest/indexer.js'
 import { sourceTypeFromName, SUPPORTED_EXTENSIONS } from '../kb/ingest/parse.js'
@@ -16,6 +17,7 @@ const ListQuery = z.object({
   status: z.string().optional(),
   q: z.string().optional(),
   tag: z.string().optional().describe('按标签精确筛选'),
+  view: z.enum(['accessible', 'manage']).default('accessible'),
   page: z.coerce.number().int().min(1).default(1),
   size: z.coerce.number().int().min(1).max(100).default(20)
 })
@@ -51,8 +53,10 @@ export function registerDocsRoutes(app: FastifyInstance): void {
 
       const claims = (req as AuthedRequest).claims
       const ctx = loadAccessContext(db, claims.sub)
-      // 管理员可写任意 scope;curator 只能写自己可见的范围。
-      if (claims.role !== 'admin' && !canAccessScope(ctx, scopeId)) {
+      const target = db.prepare('SELECT kind, owner_user_id AS ownerUserId FROM v_effective_scopes WHERE id=?')
+        .get(scopeId) as { kind: string; ownerUserId: string | null } | undefined
+      if (!target || (target.kind === 'personal' && target.ownerUserId !== claims.sub) ||
+          (claims.role !== 'admin' && !canAccessScope(ctx, scopeId))) {
         return reply.code(403).send(fail(4032, '无权向该范围上传'))
       }
 
@@ -82,7 +86,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       const existing = db
         .prepare(
           `SELECT id, status FROM documents
-            WHERE content_hash = ? AND scope_id = ? AND status != 'archived'`
+            WHERE content_hash = ? AND scope_id = ? AND status NOT IN ('archived','failed')`
         )
         .get(hash, scopeId) as { id: string; status: string } | undefined
       if (existing) {
@@ -148,10 +152,12 @@ export function registerDocsRoutes(app: FastifyInstance): void {
   app.get('/api/v1/docs', { preHandler: app.authenticate }, async (req, reply) => {
     const parsed = ListQuery.safeParse(req.query ?? {})
     if (!parsed.success) return reply.code(400).send(fail(4001, '查询参数错误'))
-    const { scopeId, status, q, tag, page, size } = parsed.data
+    const { scopeId, status, q, tag, page, size, view } = parsed.data
 
     const claims = (req as AuthedRequest).claims
-    const ctx = loadAccessContext(db, claims.sub)
+    const ctx = view === 'manage'
+      ? loadManagementContext(db, claims.sub, claims.role)
+      : loadAccessContext(db, claims.sub)
     if (ctx.scopeIds.length === 0) return reply.send(ok({ items: [], total: 0, page, size }))
 
     // 列表同样受 scope 与密级限制 —— 否则可以从标题里推断出机密文档的存在。
@@ -242,7 +248,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
   app.get('/api/v1/docs/:id', { preHandler: app.authenticate }, async (req, reply) => {
     const { id } = req.params as { id: string }
     const claims = (req as AuthedRequest).claims
-    const ctx = loadAccessContext(db, claims.sub)
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
     // 按 id 读取必须单独校验:不走检索链路,否则可以靠猜 id 绕过 scope。
     if (!canAccessDocument(db, ctx, id)) {
       return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
@@ -272,7 +278,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
   app.get('/api/v1/docs/:id/status', { preHandler: app.authenticate }, async (req, reply) => {
     const { id } = req.params as { id: string }
     const claims = (req as AuthedRequest).claims
-    const ctx = loadAccessContext(db, claims.sub)
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
 
     // 状态接口需要看到 pending/parsing/chunking/embedding 等中间态才能让
     // 管理员观察进度 —— canAccessDocument 强制 status='ready' 会在这一阶段
@@ -331,12 +337,12 @@ export function registerDocsRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
       if (!canAccessDocument(db, ctx, id)) {
         return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
       }
 
-      const q = req.query as { page?: string; range?: string; format?: string }
+      const q = req.query as { page?: string; range?: string; afterSeq?: string; format?: string }
       const wantRaw = q.format === 'raw'
 
       const doc = db
@@ -359,27 +365,17 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         )
       }
 
-      // 所有已摄取类型都按 page / seq 返回解析后的 chunks。
-      const params: unknown[] = [id]
-      let where = 'doc_id = ?'
-      if (q.page) {
-        where += ' AND loc_page = ?'
-        params.push(Number(q.page))
-      } else if (q.range) {
-        const m = /^(-?\d+):(-?\d+)$/.exec(q.range)
-        if (!m) return reply.code(400).send(fail(4001, 'range 必须是 start:end'))
-        const a = Math.max(0, Number(m[1]))
-        const b = Math.max(a, Number(m[2]))
-        where += ' AND seq BETWEEN ? AND ?'
-        params.push(a, b)
-      }
-      const chunks = db
-        .prepare(
-          `SELECT id, seq, text, heading, loc_page AS locPage, loc_start_ms AS locStartMs,
-                  loc_end_ms AS locEndMs
-             FROM chunks WHERE ${where} ORDER BY seq LIMIT 200`
-        )
-        .all(...params) as Record<string, unknown>[]
+      if (q.range && !/^-?\d+:-?\d+$/.test(q.range))
+        return reply.code(400).send(fail(4001, 'range 必须是 start:end'))
+      if (q.page && (!Number.isSafeInteger(Number(q.page)) || Number(q.page) < 1))
+        return reply.code(400).send(fail(4001, 'page 必须是正整数'))
+      if (q.afterSeq && (!Number.isSafeInteger(Number(q.afterSeq)) || Number(q.afterSeq) < 0))
+        return reply.code(400).send(fail(4001, 'afterSeq 必须是非负整数'))
+      const { chunks, hasMore, nextSeq } = readDocumentChunks(db, id, {
+        page: q.page ? Number(q.page) : undefined,
+        range: q.range,
+        afterSeq: q.afterSeq ? Number(q.afterSeq) : undefined
+      })
 
       const text = chunks.map((c) => c.text).join('\n\n')
       return reply.send(
@@ -389,6 +385,8 @@ export function registerDocsRoutes(app: FastifyInstance): void {
           sourceType: doc.sourceType,
           text,
           chunks,
+          hasMore,
+          nextSeq,
           rawUrl: doc.storageKey ? `/api/v1/docs/${id}/raw` : null
         })
       )
@@ -414,7 +412,8 @@ export function registerDocsRoutes(app: FastifyInstance): void {
           // Older desktop clients explicitly sent null when a citation had no
           // page. Treat it the same as an omitted page and return the full doc.
           page: z.number().int().positive().nullish(),
-          range: z.string().regex(/^-?\d+:-?\d+$/).optional()
+          range: z.string().regex(/^-?\d+:-?\d+$/).optional(),
+          afterSeq: z.number().int().min(0).nullish()
         })
         .safeParse(req.body ?? {})
       if (!parsed.success) {
@@ -437,27 +436,9 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         | undefined
       if (!doc) return reply.code(404).send(fail(4041, '文档不存在'))
 
-      const params: unknown[] = [parsed.data.docId]
-      let where = 'doc_id = ?'
-      if (parsed.data.page != null) {
-        where += ' AND loc_page = ?'
-        params.push(parsed.data.page)
-      } else if (parsed.data.range) {
-        const [a, b] = parsed.data.range.split(':').map(Number)
-        const lo = Math.max(0, Math.min(a, b))
-        const hi = Math.max(a, b)
-        where += ' AND seq BETWEEN ? AND ?'
-        params.push(lo, hi)
-      }
-      const rows = db
-        .prepare(
-          `SELECT seq, text, heading, loc_page AS locPage, loc_start_ms AS locStartMs,
-                  loc_end_ms AS locEndMs
-             FROM chunks WHERE ${where} ORDER BY seq LIMIT 200`
-        )
-        .all(...params) as Record<string, unknown>[]
-      const text = rows.map((r) => r.text).join('\n\n')
-      return reply.send(ok({ docId: parsed.data.docId, text, chunks: rows }))
+      const { chunks, hasMore, nextSeq } = readDocumentChunks(db, parsed.data.docId, parsed.data)
+      const text = chunks.map((r) => r.text).join('\n\n')
+      return reply.send(ok({ docId: parsed.data.docId, text, chunks, hasMore, nextSeq }))
     }
   )
 
@@ -465,7 +446,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
   app.get('/api/v1/docs/:id/raw', { preHandler: app.authenticate }, async (req, reply) => {
     const { id } = req.params as { id: string }
     const claims = (req as AuthedRequest).claims
-    const ctx = loadAccessContext(db, claims.sub)
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
     if (!canAccessDocument(db, ctx, id)) {
       return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
     }
@@ -492,8 +473,11 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       if (!parsed.success) return reply.code(400).send(fail(4001, '参数错误'))
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
-      if (claims.role !== 'admin' && !canAccessDocument(db, ctx, id)) {
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
+      const current = db.prepare('SELECT scope_id AS scopeId, sensitivity, status FROM documents WHERE id=?')
+        .get(id) as { scopeId: string; sensitivity: number; status: string } | undefined
+      if (!current || current.status === 'archived' || !canAccessScope(ctx, current.scopeId) ||
+          current.sensitivity > ctx.clearance) {
         return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
       }
 
@@ -506,8 +490,8 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         return reply.code(403).send(fail(4036, '修改可见范围仅管理员可操作'))
       }
       if (v.scopeId !== undefined) {
-        const exists = db.prepare('SELECT 1 FROM scopes WHERE id = ?').get(v.scopeId)
-        if (!exists) return reply.code(400).send(fail(4001, '目标 scope 不存在'))
+        if (!canPublishDocument(db, ctx, claims.role, v.scopeId))
+          return reply.code(403).send(fail(4036, '目标范围不可写入'))
       }
       if (v.sensitivity !== undefined && claims.role !== 'admin') {
         return reply.code(403).send(fail(4036, '修改密级仅管理员可操作'))
@@ -576,8 +560,11 @@ export function registerDocsRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
-      if (claims.role !== 'admin' && !canAccessDocument(db, ctx, id)) {
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
+      const current = db.prepare('SELECT scope_id AS scopeId, sensitivity, status FROM documents WHERE id=?')
+        .get(id) as { scopeId: string; sensitivity: number; status: string } | undefined
+      if (!current || current.status === 'archived' || !canAccessScope(ctx, current.scopeId) ||
+          current.sensitivity > ctx.clearance) {
         return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
       }
       const doc = db.prepare(
@@ -612,11 +599,12 @@ export function registerDocsRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const oldId = (req.params as { id: string }).id
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
       const old = db
         .prepare(
           `SELECT scope_id AS scopeId, sensitivity, sensitivity AS sens,
                   owner_id AS ownerId, version, source_type AS sourceType, title,
+                  volatility, d.status,
                   family_id AS familyId, s.kind AS scopeKind
              FROM documents d JOIN v_effective_scopes s ON s.id=d.scope_id
             WHERE d.id = ?`
@@ -629,14 +617,17 @@ export function registerDocsRoutes(app: FastifyInstance): void {
             version: number
             sourceType: string
             title: string
+            volatility: 'stable' | 'volatile'
+            status: string
             familyId: string | null
             scopeKind: string
           }
         | undefined
-      if (!old) return reply.code(404).send(fail(4041, '原文档不存在'))
-      const mayManage = claims.role === 'admin' ||
+      if (!old || old.status !== 'ready') return reply.code(404).send(fail(4041, '原文档不存在或尚不可更新'))
+      const mayManage = (claims.role === 'admin' && canAccessDocument(db, ctx, oldId)) ||
         (claims.role === 'curator' && canAccessDocument(db, ctx, oldId)) ||
-        (old.scopeKind === 'personal' && old.ownerId === claims.sub && canAccessDocument(db, ctx, oldId))
+        (old.ownerId === claims.sub && canAccessDocument(db, ctx, oldId) &&
+          canPublishDocument(db, ctx, claims.role, old.scopeId))
       if (!mayManage) return reply.code(404).send(fail(4041, '原文档不存在或无权访问'))
 
       const data = await req.file({ limits: { fileSize: cfg.maxUploadBytes } })
@@ -709,7 +700,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         buf.length,
         old.ownerId ?? claims.sub,
         old.sensitivity,
-        'stable',
+        old.volatility,
         oldId,
         old.version + 1,
         familyId,
@@ -747,13 +738,13 @@ export function registerDocsRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
       const row = db.prepare(
         `SELECT d.owner_id AS ownerId, s.kind AS scopeKind
            FROM documents d JOIN v_effective_scopes s ON s.id=d.scope_id
           WHERE d.id=?`
       ).get(id) as { ownerId: string | null; scopeKind: string } | undefined
-      const mayManage = claims.role === 'admin' ||
+      const mayManage = (claims.role === 'admin' && canAccessDocument(db, ctx, id)) ||
         (claims.role === 'curator' && canAccessDocument(db, ctx, id)) ||
         (row?.ownerId === claims.sub && canAccessDocument(db, ctx, id))
       if (!mayManage) {

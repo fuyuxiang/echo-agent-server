@@ -54,6 +54,7 @@ beforeAll(async () => {
   const { fixtureIntoDb } = await fixtureModulePromise
   await fixtureIntoDb(dbPath)
   db = openDb({ path: dbPath })
+  db.prepare("UPDATE enterprise_policy SET offline_enterprise=1 WHERE id='default'").run()
   app = buildApp({ db, cfg: testConfig(), serveWeb: false })
 })
 

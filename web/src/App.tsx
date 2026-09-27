@@ -41,7 +41,6 @@ export default function App() {
                 <Route path="/review" element={<Review />} />
                 <Route path="/memories" element={<Memories />} />
                 <Route path="/search" element={<SearchTest />} />
-                <Route path="/quality" element={<Quality />} />
               </Route>
               {/* 仅 admin */}
               <Route element={<ProtectedRoute adminOnly />}>
@@ -49,6 +48,7 @@ export default function App() {
                 <Route path="/groups" element={<Groups />} />
                 <Route path="/model-config" element={<ModelConfig />} />
                 <Route path="/audit" element={<Audit />} />
+                <Route path="/quality" element={<Quality />} />
                 <Route path="/enterprise-policy" element={<EnterprisePolicy />} />
               </Route>
               <Route path="/" element={<Navigate to="/documents" replace />} />

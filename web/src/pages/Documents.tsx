@@ -1,13 +1,14 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   Table, Button, Upload, Modal, Form, Select, Input, Tag, Space, Progress,
-  Tooltip, Popconfirm, message, Alert,
+  Tooltip, Popconfirm, message, Alert, Tabs,
 } from 'antd'
-import { UploadOutlined, ReloadOutlined, DeleteOutlined, InboxOutlined } from '@ant-design/icons'
+import { UploadOutlined, ReloadOutlined, DeleteOutlined, InboxOutlined, EyeOutlined, DownloadOutlined } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload/interface'
 import * as api from '../api'
 import type { DocumentItem, DocStatus, Scope } from '../types'
 import { fmtBytes, fmtTime } from '../utils/format'
+import { DocumentSubmissionReview } from './Review'
 
 const STATUS_META: Record<DocStatus, { color: string; label: string }> = {
   pending: { color: 'default', label: '排队中' },
@@ -31,6 +32,9 @@ export default function Documents() {
   const [tagFilter, setTagFilter] = useState('')
   const [loading, setLoading] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
+  const [section, setSection] = useState('library')
+  const [preview, setPreview] = useState<{ id: string; title: string; text: string; nextSeq: number | null; hasMore: boolean } | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
   const timer = useRef<number | null>(null)
 
   const load = useCallback(async () => {
@@ -41,7 +45,8 @@ export default function Documents() {
         size: 20,
         scopeId: scopeFilter,
         q: keyword || undefined,
-        tag: tagFilter || undefined
+        tag: tagFilter || undefined,
+        view: 'manage',
       })
       setItems(res.items)
       setTotal(res.total)
@@ -67,6 +72,38 @@ export default function Documents() {
       if (timer.current) { clearInterval(timer.current); timer.current = null }
     }
   }, [items, load])
+
+  const openPreview = async (doc: DocumentItem): Promise<void> => {
+    setPreviewLoading(true)
+    try {
+      const page = await api.getDocumentContent(doc.id)
+      setPreview({ id: doc.id, title: doc.title, text: page.text, nextSeq: page.nextSeq, hasMore: page.hasMore })
+    } finally { setPreviewLoading(false) }
+  }
+
+  const morePreview = async (): Promise<void> => {
+    if (!preview?.hasMore || preview.nextSeq == null) return
+    setPreviewLoading(true)
+    try {
+      const page = await api.getDocumentContent(preview.id, preview.nextSeq)
+      setPreview((old) => old ? {
+        ...old,
+        text: `${old.text}\n\n${page.text}`,
+        nextSeq: page.nextSeq,
+        hasMore: page.hasMore,
+      } : old)
+    } finally { setPreviewLoading(false) }
+  }
+
+  const download = async (doc: DocumentItem | { id: string; title: string }): Promise<void> => {
+    const blob = await api.downloadDocRaw(doc.id)
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = doc.title
+    anchor.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 30_000)
+  }
 
   const columns = [
     {
@@ -143,9 +180,13 @@ export default function Documents() {
     { title: '更新时间', dataIndex: 'updatedAt', width: 160, render: fmtTime },
     {
       title: '操作',
-      width: 150,
+      width: 250,
       render: (_: unknown, r: DocumentItem) => (
         <Space size={4}>
+          {r.status === 'ready' && <>
+            <Button size="small" type="link" icon={<EyeOutlined />} loading={previewLoading} onClick={() => void openPreview(r)}>查看</Button>
+            <Button size="small" type="link" icon={<DownloadOutlined />} onClick={() => void download(r)}>下载</Button>
+          </>}
           <Tooltip title="重新解析并索引。改了分块策略或换嵌入模型后需要执行">
             <Button
               size="small"
@@ -178,6 +219,11 @@ export default function Documents() {
 
   return (
     <>
+      <Tabs activeKey={section} onChange={setSection} items={[
+        { key: 'library', label: '在库文档' },
+        { key: 'history', label: '历史提交' },
+      ]} />
+      {section === 'history' ? <DocumentSubmissionReview /> : <>
       <Space style={{ marginBottom: 16 }} wrap>
         <Button type="primary" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>
           上传文档
@@ -226,6 +272,19 @@ export default function Documents() {
         onClose={() => setUploadOpen(false)}
         onDone={() => { setUploadOpen(false); void load() }}
       />
+      </>}
+      <Modal open={!!preview} title={preview?.title} onCancel={() => setPreview(null)} footer={
+        <Space>
+          {preview?.hasMore && <Button loading={previewLoading} onClick={() => void morePreview()}>加载后续内容</Button>}
+          {preview && <Button icon={<DownloadOutlined />} onClick={() => void download(preview)}>下载原件</Button>}
+          <Button onClick={() => setPreview(null)}>关闭</Button>
+        </Space>
+      } width={800}>
+        <Alert type="info" showIcon message="预览内容来自知识索引；原件排版可下载查看" style={{ marginBottom: 12 }} />
+        <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '55vh', overflow: 'auto', fontFamily: 'inherit' }}>
+          {preview?.text || '暂无可预览的解析内容'}
+        </pre>
+      </Modal>
     </>
   )
 }
