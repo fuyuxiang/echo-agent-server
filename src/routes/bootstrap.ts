@@ -5,6 +5,7 @@ import { findById, getUserGroups } from '../dao/users.js'
 import { ok } from '../reply.js'
 import { serverSigningPublicKey, signServerPayload } from '../server-signing.js'
 import { z } from 'zod'
+import { canPublishDocument, loadAccessContext } from '../auth/scopes.js'
 
 const POLICY_TTL_MS = 24 * 60 * 60_000
 
@@ -47,7 +48,12 @@ export function registerBootstrapRoutes(app: FastifyInstance): void {
         WHERE v.user_id = ?
         ORDER BY CASE s.kind WHEN 'personal' THEN 0 WHEN 'team' THEN 1 ELSE 2 END,
                  s.name`
-    ).all(claims.sub)
+    ).all(claims.sub) as Array<Record<string, unknown> & { id: string }>
+    const access = loadAccessContext(db, claims.sub)
+    const writableScopes = scopes.map((scope) => ({
+      ...scope,
+      canPublishDocuments: canPublishDocument(db, access, claims.role, scope.id)
+    }))
 
     const issuedAt = Date.now()
     const stored = readPolicy(app)
@@ -76,7 +82,7 @@ export function registerBootstrapRoutes(app: FastifyInstance): void {
         clearance: user.clearance,
         groups: getUserGroups(db, user.id)
       },
-      scopes,
+      scopes: writableScopes,
       policy,
       policyPayload,
       policySignature,

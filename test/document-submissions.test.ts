@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import { buildApp } from '../src/app.js'
 import { testConfig } from '../src/config.js'
-import { createUser } from '../src/dao/users.js'
+import { createUser, setUserGroups } from '../src/dao/users.js'
 import { openDb, type DB } from '../src/db/index.js'
 import { createEmbedder } from '../src/models/embedder.js'
 import { ensureOrgScope } from '../src/server.js'
@@ -46,10 +46,14 @@ async function setup(): Promise<{
   db: DB
   app: FastifyInstance
   orgScope: string
+  teamScope: string
   aliceId: string
 }> {
   const db = openDb({ path: ':memory:' })
   const orgScope = ensureOrgScope(db)
+  db.prepare("INSERT INTO groups VALUES ('g_docs','文档组',NULL,'',?)").run(Date.now())
+  const teamScope = 's_docs'
+  db.prepare("INSERT INTO scopes VALUES (?,'team','g_docs','文档组')").run(teamScope)
   await createUser(db, {
     username: 'admin',
     password: 'admin-password',
@@ -58,7 +62,8 @@ async function setup(): Promise<{
   })
   const alice = await createUser(db, { username: 'alice', password: 'alice-password' })
   await createUser(db, { username: 'bob', password: 'bob-password' })
-  return { db, app: buildApp({ db, cfg, serveWeb: false }), orgScope, aliceId: alice.id }
+  setUserGroups(db, alice.id, ['g_docs'])
+  return { db, app: buildApp({ db, cfg, serveWeb: false }), orgScope, teamScope, aliceId: alice.id }
 }
 
 async function submit(
@@ -124,8 +129,8 @@ describe('文档个人/组织发布流', () => {
     expect(other.json().data.chunks).toHaveLength(0)
   })
 
-  it('员工上传到公司空间先待审，通过并摄取后全组织可检索', async () => {
-    const { db, app, orgScope } = await setup()
+  it('团队成员直接发布并可查看、下载和删除自己的文件，原件保持在存储中', async () => {
+    const { db, app, orgScope, teamScope } = await setup()
     const aliceToken = await login(app, 'alice', 'alice-password')
     const adminToken = await login(app, 'admin', 'admin-password')
     const bobToken = await login(app, 'bob', 'bob-password')
@@ -133,26 +138,27 @@ describe('文档个人/组织发布流', () => {
     const submitted = await submit(
       app,
       aliceToken,
-      orgScope,
+      teamScope,
       '# 客户响应规范\n\nP1 故障必须在十五分钟内首次响应。'
     )
-    expect(submitted.json().data.state).toBe('pending')
-    expect(db.prepare('SELECT COUNT(*) AS n FROM documents').get()).toMatchObject({ n: 0 })
+    expect(submitted.json().data.state).toBe('approved')
+    expect(db.prepare('SELECT COUNT(*) AS n FROM documents').get()).toMatchObject({ n: 1 })
     const submissionId = submitted.json().data.submissionId
+    const docId = submitted.json().data.docId
 
     const memberReviewDownload = await app.inject({
       method: 'GET',
       url: `/api/v1/document-submissions/${submissionId}/raw`,
       headers: bearer(bobToken)
     })
-    expect(memberReviewDownload.statusCode).toBe(403)
-    const reviewerDownload = await app.inject({
+    expect(memberReviewDownload.statusCode).toBe(404)
+    const ownerDownload = await app.inject({
       method: 'GET',
       url: `/api/v1/document-submissions/${submissionId}/raw`,
-      headers: bearer(adminToken)
+      headers: bearer(aliceToken)
     })
-    expect(reviewerDownload.statusCode).toBe(200)
-    expect(reviewerDownload.body).toContain('P1 故障')
+    expect(ownerDownload.statusCode).toBe(200)
+    expect(ownerDownload.body).toContain('P1 故障')
 
     const before = await app.inject({
       method: 'POST',
@@ -162,27 +168,39 @@ describe('文档个人/组织发布流', () => {
     })
     expect(before.json().data.chunks).toHaveLength(0)
 
-    const approved = await app.inject({
-      method: 'POST',
-      url: `/api/v1/document-submissions/${submissionId}/approve`,
-      headers: bearer(adminToken),
-      payload: { note: '内容已校验' }
-    })
-    expect(approved.statusCode).toBe(200)
     await drain({ db, cfg, embedder: createEmbedder(cfg) })
 
     const after = await app.inject({
       method: 'POST',
       url: '/api/v1/retrieve',
-      headers: bearer(bobToken),
+      headers: bearer(aliceToken),
       payload: { query: 'P1 故障首次响应' }
     })
     expect(after.json().data.chunks.length).toBeGreaterThan(0)
     expect(after.json().data.chunks[0].docTitle).toBe('客户响应规范')
+    const deniedOrg = await submit(app, aliceToken, orgScope, '# 不允许普通成员全组织发布')
+    expect(deniedOrg.statusCode).toBe(403)
+    const adminOrg = await submit(app, adminToken, orgScope, '# 全组织文档')
+    expect(adminOrg.statusCode).toBe(200)
+
+    const storedKey = (db.prepare('SELECT storage_key AS storageKey FROM documents WHERE id=?')
+      .get(docId) as { storageKey: string }).storageKey
+    const deleted = await app.inject({ method: 'DELETE', url: `/api/v1/document-submissions/${submissionId}`, headers: bearer(aliceToken) })
+    expect(deleted.statusCode).toBe(200)
+    expect(db.prepare('SELECT status FROM documents WHERE id=?').get(docId)).toMatchObject({ status: 'archived' })
+    expect(db.prepare('SELECT hidden_by_submitter AS hidden FROM document_submissions WHERE id=?').get(submissionId))
+      .toMatchObject({ hidden: 1 })
+    expect((await import('node:fs')).existsSync(join(storageDir, storedKey))).toBe(true)
+    const gone = await app.inject({ method: 'GET', url: `/api/v1/docs/${docId}/raw`, headers: bearer(aliceToken) })
+    expect(gone.statusCode).toBe(404)
+    const hiddenOriginal = await app.inject({ method: 'GET', url: `/api/v1/document-submissions/${submissionId}/raw`, headers: bearer(aliceToken) })
+    expect(hiddenOriginal.statusCode).toBe(404)
+    const minePage = await app.inject({ method: 'GET', url: '/api/v1/document-submissions/mine/page', headers: bearer(aliceToken) })
+    expect(minePage.json().data.total).toBe(0)
   })
 
-  it('个人文档可以发布副本到组织，审核前后的可见性立即切换', async () => {
-    const { db, app, orgScope, aliceId } = await setup()
+  it('个人文档可以发布副本到自己的团队，扫描后自动进入索引', async () => {
+    const { db, app, teamScope, aliceId } = await setup()
     const aliceToken = await login(app, 'alice', 'alice-password')
     const adminToken = await login(app, 'admin', 'admin-password')
     const bobToken = await login(app, 'bob', 'bob-password')
@@ -199,10 +217,10 @@ describe('文档个人/组织发布流', () => {
       method: 'POST',
       url: `/api/v1/docs/${sourceDocId}/publish`,
       headers: bearer(aliceToken),
-      payload: { targetScopeId: orgScope, title: '蓝海客户应急手册' }
+      payload: { targetScopeId: teamScope, title: '蓝海客户应急手册' }
     })
     expect(published.statusCode).toBe(200)
-    expect(published.json().data.state).toBe('pending')
+    expect(published.json().data.state).toBe('approved')
 
     const before = await app.inject({
       method: 'POST',
@@ -212,19 +230,12 @@ describe('文档个人/组织发布流', () => {
     })
     expect(before.json().data.chunks).toHaveLength(0)
 
-    const approved = await app.inject({
-      method: 'POST',
-      url: `/api/v1/document-submissions/${published.json().data.submissionId}/approve`,
-      headers: bearer(adminToken),
-      payload: { note: '可发布' }
-    })
-    expect(approved.statusCode).toBe(200)
     await drain({ db, cfg, embedder: createEmbedder(cfg) })
 
     const after = await app.inject({
       method: 'POST',
       url: '/api/v1/retrieve',
-      headers: bearer(bobToken),
+      headers: bearer(aliceToken),
       payload: { query: '珊瑚七号' }
     })
     expect(after.json().data.chunks.some((chunk: { docTitle: string }) =>

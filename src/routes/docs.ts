@@ -204,7 +204,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
                 d.fts_status AS ftsStatus, d.vector_status AS vectorStatus,
                 d.index_model_version AS indexModelVersion,
                 s.kind AS scopeKind, s.name AS scopeName, s.id AS scopeId,
-                u.display_name AS ownerName,
+                u.display_name AS ownerName, d.owner_id AS ownerId,
                 (SELECT COUNT(*) FROM chunks c WHERE c.doc_id = d.id) AS chunkCount
            FROM documents d
            JOIN document_families f ON f.id = d.family_id
@@ -755,7 +755,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       ).get(id) as { ownerId: string | null; scopeKind: string } | undefined
       const mayManage = claims.role === 'admin' ||
         (claims.role === 'curator' && canAccessDocument(db, ctx, id)) ||
-        (row?.scopeKind === 'personal' && row.ownerId === claims.sub && canAccessDocument(db, ctx, id))
+        (row?.ownerId === claims.sub && canAccessDocument(db, ctx, id))
       if (!mayManage) {
         return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
       }

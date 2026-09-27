@@ -1,5 +1,14 @@
 FROM node:22-bookworm-slim AS builder
 
+ARG ECHO_DEBIAN_MIRROR
+RUN if [ -n "$ECHO_DEBIAN_MIRROR" ]; then \
+      sed -i "s|http://deb.debian.org|${ECHO_DEBIAN_MIRROR%/}|g" \
+        /etc/apt/sources.list.d/debian.sources; \
+    fi \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci

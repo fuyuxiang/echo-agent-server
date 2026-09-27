@@ -44,6 +44,24 @@ export function canAccessScope(ctx: AccessContext, scopeId: string): boolean {
   return ctx.scopeIds.includes(scopeId)
 }
 
+/** Publishing is a separate capability from reading a scope. */
+export function canPublishDocument(
+  db: DB,
+  ctx: AccessContext,
+  role: 'admin' | 'curator' | 'member',
+  scopeId: string
+): boolean {
+  const scope = db.prepare(
+    'SELECT kind, owner_user_id AS ownerUserId FROM v_effective_scopes WHERE id = ?'
+  ).get(scopeId) as { kind: string; ownerUserId: string | null } | undefined
+  if (!scope) return false
+  if (role === 'admin') return true
+  if (!canAccessScope(ctx, scopeId)) return false
+  if (scope.kind === 'personal') return scope.ownerUserId === ctx.userId
+  if (scope.kind === 'team') return true
+  return role === 'curator'
+}
+
 export function canAccessDocument(
   db: DB,
   ctx: AccessContext,

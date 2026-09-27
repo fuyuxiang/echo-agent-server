@@ -226,15 +226,16 @@ function DocumentSubmissionReview(): JSX.Element {
   useEffect(() => { void load() }, [load])
   return (
     <>
+      <Alert type="info" showIcon style={{ marginBottom: 16 }} message="新文档在安全扫描通过后自动发布" description="这里保留历史待处理记录和已发布记录，便于回溯。团队成员可上传到所属团队，全组织文档由知识管理员发布。" />
       <Space style={{ marginBottom: 16 }}>
         <Segmented value={state} onChange={(value) => setState(value as PromotionState)} options={[
-          { label: '待审核', value: 'pending' }, { label: '已通过', value: 'approved' }, { label: '已驳回', value: 'rejected' },
+          { label: '历史待处理', value: 'pending' }, { label: '已发布', value: 'approved' }, { label: '已驳回', value: 'rejected' },
         ]} />
         <Button onClick={() => void load()}>刷新</Button>
       </Space>
-      {loading ? <Spin /> : items.length === 0 ? <Empty description="暂无文档提交" /> : (
+      {loading ? <Spin /> : items.length === 0 ? <Empty description={state === 'pending' ? '没有需要处理的历史文档提交' : '暂无文档提交'} /> : (
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          {items.map((item) => <Card key={item.id} size="small" title={<Space wrap><Tag color="cyan">文档</Tag><strong>{item.title}</strong><span>{item.submitterName} 提交 · {fmtRelative(item.createdAt)}</span><Tag color={item.scopeKind === 'org' ? 'blue' : 'geekblue'}>{item.scopeName}</Tag></Space>} extra={<Space><Button size="small" icon={<DownloadOutlined />} onClick={() => void saveReviewFile(() => api.downloadDocumentSubmission(item.id), item.title)}>下载审阅</Button>{state === 'pending' && <><Button type="primary" size="small" icon={<CheckOutlined />} onClick={async () => { await api.approveDocumentSubmission(item.id); message.success('已通过，文档开始建立索引'); void load() }}>通过</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => rejectWithReason('驳回文档提交', (note) => api.rejectDocumentSubmission(item.id, note), () => void load())}>驳回</Button></>}</Space>}>
+          {items.map((item) => <Card key={item.id} size="small" title={<Space wrap><Tag color="cyan">文档</Tag><strong>{item.title}</strong><span>{item.submitterName} 提交 · {fmtRelative(item.createdAt)}</span><Tag color={item.scopeKind === 'org' ? 'blue' : 'geekblue'}>{item.scopeName}</Tag></Space>} extra={<Space><Button size="small" icon={<DownloadOutlined />} onClick={() => void saveReviewFile(() => api.downloadDocumentSubmission(item.id), item.title)}>下载原件</Button>{state === 'pending' && <><Button type="primary" size="small" icon={<CheckOutlined />} onClick={async () => { await api.approveDocumentSubmission(item.id); message.success('已通过，文档开始建立索引'); void load() }}>发布历史提交</Button><Button danger size="small" icon={<CloseOutlined />} onClick={() => rejectWithReason('驳回文档提交', (note) => api.rejectDocumentSubmission(item.id, note), () => void load())}>驳回</Button></>}</Space>}>
             <Descriptions size="small" column={3}>
               <Descriptions.Item label="类型">{item.sourceType.toUpperCase()}</Descriptions.Item>
               <Descriptions.Item label="大小">{(item.byteSize / 1024).toFixed(1)} KB</Descriptions.Item>

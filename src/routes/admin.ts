@@ -13,6 +13,7 @@ import {
   findById
 } from '../dao/users.js'
 import { queryAuditLogs } from '../audit.js'
+import { canPublishDocument, loadAccessContext } from '../auth/scopes.js'
 
 const CreateUserSchema = z.object({
   username: z.string().min(2).max(64),
@@ -210,7 +211,11 @@ export function registerAdminRoutes(app: FastifyInstance): void {
         claims.role === 'admin'
           ? db.prepare(sql).all()
           : db.prepare(sql).all(claims.sub)
-      return reply.send(ok(rows))
+      const access = loadAccessContext(db, claims.sub)
+      return reply.send(ok((rows as Array<Record<string, unknown> & { id: string }>).map((scope) => ({
+        ...scope,
+        canPublishDocuments: canPublishDocument(db, access, claims.role, scope.id)
+      }))))
     }
   )
 

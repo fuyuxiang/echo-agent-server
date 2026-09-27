@@ -2,7 +2,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { type AuthedRequest, requireCurator } from '../auth/jwt.js'
-import { canAccessScope, loadAccessContext } from '../auth/scopes.js'
+import { canAccessScope, canPublishDocument, loadAccessContext } from '../auth/scopes.js'
+import { deleteChunks } from '../kb/ingest/indexer.js'
+import { archiveFamilyIfCurrent } from '../dao/documents.js'
 import { createDocumentFamily } from '../dao/documents.js'
 import { sourceTypeFromName, SUPPORTED_EXTENSIONS } from '../kb/ingest/parse.js'
 import { enqueueIngest } from '../kb/ingest/worker.js'
@@ -129,8 +131,9 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
     const target = db.prepare(
       `SELECT id,kind FROM v_effective_scopes WHERE id=?`
     ).get(parsed.data.targetScopeId) as { id: string; kind: string } | undefined
-    if (!target || target.kind === 'personal' || !canAccessScope(ctx, target.id)) {
-      return reply.code(403).send(fail(4033, '只能发布到当前用户可见的团队/组织空间'))
+    if (!target || target.kind === 'personal' ||
+      !canPublishDocument(db, ctx, claims.role, target.id)) {
+      return reply.code(403).send(fail(4033, '没有目标范围的文档发布权限'))
     }
     const existing = db.prepare(
       `SELECT id,status FROM documents
@@ -149,7 +152,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
     const quarantineKey = await storage.put(bytes, ext, 'quarantine/documents')
     const now = Date.now()
     const submissionId = randomUUID()
-    const autoApprove = claims.role !== 'member'
+    const autoApprove = true
     const tags = parsed.data.tags ?? (db.prepare('SELECT tag FROM doc_tags WHERE doc_id=?').all(sourceId) as { tag: string }[])
       .map((row) => row.tag)
     const submission: SubmissionRow = {
@@ -226,8 +229,8 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
 
       const claims = (req as AuthedRequest).claims
       const ctx = loadAccessContext(db, claims.sub)
-      if (!canAccessScope(ctx, targetScope)) {
-        return reply.code(403).send(fail(4033, '无权向该范围提交文档'))
+      if (!canPublishDocument(db, ctx, claims.role, targetScope)) {
+        return reply.code(403).send(fail(4033, '没有目标范围的文档发布权限'))
       }
       const scope = db
         .prepare(
@@ -281,24 +284,15 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
         }))
       }
 
-      const duplicate = db
-        .prepare(
-          `SELECT id FROM document_submissions
-            WHERE submitter_id = ? AND target_scope = ? AND content_hash = ? AND state = 'pending'
-            LIMIT 1`
-        )
-        .get(claims.sub, targetScope, contentHash) as { id: string } | undefined
-      if (duplicate) {
-        return reply.send(ok({ submissionId: duplicate.id, docId: null, state: 'pending', dedup: true }))
-      }
-
       const now = Date.now()
       const id = randomUUID()
       const title = fields.title?.value?.trim() || fileName
       const sensitivity = Math.max(0, Math.min(2, Number(fields.sensitivity?.value ?? 0)))
       const volatility = fields.volatility?.value === 'volatile' ? 'volatile' : 'stable'
       const tags = readTags(fields.tags?.value)
-      const autoApprove = scope.kind === 'personal' || claims.role !== 'member'
+      // Legacy pending submissions remain reviewable, but new uploads publish
+      // immediately after the technical scan when the scope grants write access.
+      const autoApprove = true
       const sourceDocumentId = fields.sourceDocumentId?.value?.trim() || null
       if (sourceDocumentId) {
         const source = db.prepare(
@@ -423,11 +417,14 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
               ds.result_document_id AS resultDocumentId,
               ds.created_at AS createdAt, ds.reviewed_at AS reviewedAt,
               s.id AS scopeId, s.name AS scopeName, s.kind AS scopeKind,
+              CASE WHEN d.owner_id = ds.submitter_id AND d.status = 'ready'
+                   THEN 1 ELSE 0 END AS canDeletePublished,
               r.display_name AS reviewerName
          FROM document_submissions ds
          JOIN v_effective_scopes s ON s.id = ds.target_scope
+         LEFT JOIN documents d ON d.id = ds.result_document_id
          LEFT JOIN users r ON r.id = ds.reviewer_id
-        WHERE ds.submitter_id = ?
+        WHERE ds.submitter_id = ? AND ds.hidden_by_submitter = 0
         ORDER BY ds.created_at DESC LIMIT 100`
     ).all(claims.sub)
     return reply.send(ok((rows as Record<string, unknown>[]).map((row) => ({
@@ -435,6 +432,44 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       scanReport: typeof row.scanReportJson === 'string' ? JSON.parse(row.scanReportJson) : null,
       scanReportJson: undefined
     }))))
+  })
+
+  app.get('/api/v1/document-submissions/mine/page', { preHandler: app.authenticate }, async (req, reply) => {
+    const parsed = z.object({
+      page: z.coerce.number().int().min(1).default(1),
+      size: z.coerce.number().int().min(1).max(100).default(20)
+    }).safeParse(req.query ?? {})
+    if (!parsed.success) return reply.code(400).send(fail(4001, '查询参数错误'))
+    const userId = (req as AuthedRequest).claims.sub
+    const { page, size } = parsed.data
+    const total = (db.prepare(
+      'SELECT COUNT(*) AS n FROM document_submissions WHERE submitter_id=? AND hidden_by_submitter=0'
+    ).get(userId) as { n: number }).n
+    const rows = db.prepare(
+      `SELECT ds.id, ds.title, ds.source_type AS sourceType, ds.byte_size AS byteSize,
+              ds.state, ds.scan_status AS scanStatus,
+              ds.scan_report_json AS scanReportJson, ds.review_note AS reviewNote,
+              ds.result_document_id AS resultDocumentId,
+              ds.created_at AS createdAt, ds.reviewed_at AS reviewedAt,
+              s.id AS scopeId, s.name AS scopeName, s.kind AS scopeKind,
+              CASE WHEN d.owner_id=ds.submitter_id AND d.status='ready'
+                   THEN 1 ELSE 0 END AS canDeletePublished,
+              r.display_name AS reviewerName
+         FROM document_submissions ds
+         JOIN v_effective_scopes s ON s.id=ds.target_scope
+         LEFT JOIN documents d ON d.id=ds.result_document_id
+         LEFT JOIN users r ON r.id=ds.reviewer_id
+        WHERE ds.submitter_id=? AND ds.hidden_by_submitter=0
+        ORDER BY ds.created_at DESC LIMIT ? OFFSET ?`
+    ).all(userId, size, (page - 1) * size) as Record<string, unknown>[]
+    return reply.send(ok({
+      items: rows.map((row) => ({
+        ...row,
+        scanReport: typeof row.scanReportJson === 'string' ? JSON.parse(row.scanReportJson) : null,
+        scanReportJson: undefined
+      })),
+      total, page, size
+    }))
   })
 
   app.get('/api/v1/document-submissions/:id', { preHandler: app.authenticate }, async (req, reply) => {
@@ -509,22 +544,30 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
 
   app.get(
     '/api/v1/document-submissions/:id/raw',
-    { preHandler: [app.authenticate, requireCurator] },
+    { preHandler: app.authenticate },
     async (req, reply) => {
       const claims = (req as AuthedRequest).claims
       const ctx = loadAccessContext(db, claims.sub)
       const id = (req.params as { id: string }).id
       const row = db.prepare(
-        `SELECT target_scope AS targetScope, title, source_type AS sourceType,
+        `SELECT target_scope AS targetScope, submitter_id AS submitterId,
+                hidden_by_submitter AS hiddenBySubmitter,
+                scan_status AS scanStatus, title, source_type AS sourceType,
                 storage_key AS storageKey
            FROM document_submissions WHERE id = ?`
       ).get(id) as {
         targetScope: string
+        submitterId: string
+        hiddenBySubmitter: number
+        scanStatus: string
         title: string
         sourceType: string
         storageKey: string
       } | undefined
-      if (!row || (claims.role !== 'admin' && !canAccessScope(ctx, row.targetScope))) {
+      const isOwner = row?.submitterId === claims.sub && row.scanStatus === 'passed' && !row.hiddenBySubmitter
+      const isReviewer = claims.role === 'admin' ||
+        (claims.role === 'curator' && !!row && canAccessScope(ctx, row.targetScope))
+      if (!row || (!isOwner && !isReviewer)) {
         return reply.code(404).send(fail(4041, '提交不存在或无权访问'))
       }
       const buf = await storage.get(row.storageKey)
@@ -641,4 +684,49 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       return reply.send(ok({ state: 'withdrawn' }))
     }
   )
+
+  /** Hide a user's upload record; archive its published document when owned. */
+  app.delete('/api/v1/document-submissions/:id', { preHandler: app.authenticate }, async (req, reply) => {
+    const claims = (req as AuthedRequest).claims
+    const id = (req.params as { id: string }).id
+    const row = db.prepare(
+      `SELECT state, result_document_id AS docId FROM document_submissions
+        WHERE id=? AND submitter_id=? AND hidden_by_submitter=0`
+    ).get(id, claims.sub) as { state: string; docId: string | null } | undefined
+    if (!row) return reply.code(404).send(fail(4041, '提交不存在'))
+    if (row.state === 'approved' && row.docId) {
+      const ctx = loadAccessContext(db, claims.sub)
+      const doc = db.prepare(
+        `SELECT owner_id AS ownerId, scope_id AS scopeId, status FROM documents WHERE id=?`
+      ).get(row.docId) as { ownerId: string | null; scopeId: string; status: string } | undefined
+      if (!doc || doc.ownerId !== claims.sub || !canAccessScope(ctx, doc.scopeId)) {
+        db.prepare('UPDATE document_submissions SET hidden_by_submitter=1 WHERE id=?').run(id)
+        app.audit(req, 'delete', id, { kind: 'own_submission_history' })
+        return reply.send(ok({ removed: true }))
+      }
+      if (!['ready', 'failed', 'archived'].includes(doc.status)) {
+        return reply.code(409).send(fail(4093, '文档正在建立索引，请稍后删除'))
+      }
+      db.transaction(() => {
+        if (doc.status === 'ready' || doc.status === 'failed') {
+          const now = Date.now()
+          deleteChunks(db, row.docId!)
+          db.prepare("UPDATE documents SET status='archived', updated_at=? WHERE id=?")
+            .run(now, row.docId)
+          archiveFamilyIfCurrent(db, row.docId!, now)
+        }
+        db.prepare('UPDATE document_submissions SET hidden_by_submitter=1 WHERE id=?').run(id)
+      })()
+    } else {
+      db.prepare(
+        `UPDATE document_submissions
+            SET state=CASE WHEN state='pending' THEN 'withdrawn' ELSE state END,
+                reviewed_at=CASE WHEN state='pending' THEN ? ELSE reviewed_at END,
+                hidden_by_submitter=1
+          WHERE id=?`
+      ).run(Date.now(), id)
+    }
+    app.audit(req, 'delete', id, { kind: 'own_submission', docId: row.docId })
+    return reply.send(ok({ removed: true }))
+  })
 }
