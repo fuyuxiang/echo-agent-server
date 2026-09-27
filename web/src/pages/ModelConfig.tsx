@@ -24,7 +24,7 @@ export default function ModelConfig() {
       chatProvider: c.chatProvider ?? 'openai-compatible',
       chatModel: c.chatModel ?? '',
       chatBaseUrl: c.chatBaseUrl ?? '',
-      embedModel: c.embedModel ?? 'bge-m3',
+      embedModel: c.embedModel ?? 'embed-pro',
       embedDim: c.embedDim ?? 1024,
       rerankModel: c.rerankModel ?? '',
       vlmModel: c.vlmModel ?? '',
@@ -122,7 +122,7 @@ export default function ModelConfig() {
           </Form.Item>
 
           <Form.Item name="embedModel" label="嵌入模型" rules={[{ required: true }]}>
-            <Input placeholder="bge-m3" />
+            <Input placeholder="embed-pro" />
           </Form.Item>
           <Form.Item
             name="embedDim"
@@ -137,7 +137,7 @@ export default function ModelConfig() {
             label="精排模型"
             extra="交叉编码器。它是准确率从「能用」到「可信」的分界,建议配置"
           >
-            <Input placeholder="bge-reranker-v2-m3" />
+            <Input placeholder="rerank-pro" />
           </Form.Item>
           <Form.Item name="vlmModel" label="图像理解模型" extra="用于给图片、图表生成文字描述">
             <Input placeholder="可选" />

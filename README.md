@@ -26,7 +26,7 @@ Echo Agent 企业组织记忆服务端。仓库包含 Fastify API、SQLite 数�
 
 ```bash
 cp .env.example .env
-# 修改 JWT、主密钥、管理员密码及模型端点
+# 在 .env 中取消注释并填写 JWT、主密钥、管理员密码及模型端点
 npm install
 npm --prefix web install
 npm run dev
@@ -42,8 +42,8 @@ npm run dev
 |---|---|
 | `ECHO_JWT_SECRET` / `ECHO_MASTER_KEY` | JWT 签名与服务端凭据加密；必填。 |
 | `ECHO_CHAT_MODEL/BASE_URL/KEY` | 新部署的聊天模型；后台数据库配置优先于环境变量。 |
-| `ECHO_EMBED_URL/KEY` | OpenAI-compatible `/embeddings`；未配时仅有开发用 hash 降级。 |
-| `ECHO_RERANK_URL/KEY` | 精排接口；未配时仅有词汇分数降级。 |
+| `ECHO_EMBED_MODEL/DIM/URL` | 模型默认 `embed-pro`、1024 维；项目环境模板配置 `http://123.56.188.16:8088/v1/embeddings`，无需 Key。未配 URL 时仅有开发用 hash 降级。 |
+| `ECHO_RERANK_MODEL/URL` | 模型默认 `rerank-pro`；项目环境模板配置 `http://123.56.188.16:8088/v1/rerank`，无需 Key。未配 URL 时仅有词汇分数降级。 |
 | `ECHO_OCR_URL/KEY` | 扫描 PDF OCR multipart 接口。 |
 | `ECHO_VLM_URL/KEY/MODEL` | 图片 caption multipart 接口与实际模型名。 |
 | `ECHO_TRANSCRIBE_URL/KEY/MODEL` | 完整的 OpenAI-compatible `/audio/transcriptions` 地址。 |
@@ -62,11 +62,14 @@ npm run dev
 
 ## Docker 生产部署
 
+Compose 从当前目录的 `.env` 读取完整服务端配置；`.env.production` 仅提供 Compose 变量（域名、端口、镜像源等）。`.env` 中的 JWT、主密钥、管理员密码及需鉴权的模型 Key 应保持注释，由 `deploy/secrets/` 提供；直接填写的值会优先于 secret 文件。更新服务时应同步完整的 `.env` 文件并重新创建容器。
+
 ```bash
+cp .env.example .env
 cp .env.production.example .env.production
-# 替换域名和所有 example.com 模型端点
+# 配置 .env 中的模型端点，并替换 .env.production 中的部署地址
 ECHO_BOOTSTRAP_ADMIN_PASSWORD='使用强密码' \
-ECHO_CHAT_KEY='...' ECHO_EMBED_KEY='...' ECHO_RERANK_KEY='...' \
+ECHO_CHAT_KEY='...' \
 ECHO_OCR_KEY='...' ECHO_VLM_KEY='...' ECHO_TRANSCRIBE_KEY='...' \
   ./deploy/init-secrets.sh
 docker compose --env-file .env.production up -d --build

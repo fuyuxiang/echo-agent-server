@@ -27,8 +27,8 @@ const Schema = z.object({
   trustProxyHops: z.coerce.number().int().min(0).max(4).default(0),
 
   embedDim: z.coerce.number().int().positive().default(1024),
-  embedModel: z.string().default('bge-m3'),
-  rerankModel: z.string().default('bge-reranker-v2-m3'),
+  embedModel: z.string().default('embed-pro'),
+  rerankModel: z.string().default('rerank-pro'),
 
   // 服务端统一代理的聊天模型。数据库中的管理员配置优先；环境变量作为
   // 首次部署和灾难恢复时的可靠回退，避免新库启动后问答只能抽取原文。
