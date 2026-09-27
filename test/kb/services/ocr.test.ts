@@ -38,6 +38,24 @@ describe('OCR cfg 注入', () => {
     await expect(c.extractFromImage(Buffer.from('x'))).rejects.toThrow(/502/)
   })
 
+  it('未配独立 OCR 时复用已配置的 M3 图片客户端', async () => {
+    const caption = vi.fn(async () => '表格第一行')
+    const c = createOcrClient(testConfig(), undefined, {
+      configured: true, model: 'MiniMax-M3', caption
+    })
+    expect(c.configured).toBe(true)
+    await expect(c.extractFromImage(Buffer.from('page'))).resolves.toBe('表格第一行')
+    expect(caption).toHaveBeenCalledWith(Buffer.from('page'), 'image/png', expect.stringContaining('逐字识别'), 4096)
+  })
+
+  it('空白页不把模型的说明文字索引为文档内容', async () => {
+    const c = createOcrClient(testConfig(), undefined, {
+      configured: true, model: 'MiniMax-M3',
+      async caption() { return '我没有看到您上传的文档图像。请重新上传。' }
+    })
+    await expect(c.extractFromImage(Buffer.from('blank'))).resolves.toBe('')
+  })
+
   afterEach(() => vi.restoreAllMocks())
 })
 

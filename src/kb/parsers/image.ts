@@ -39,6 +39,7 @@ export const imageCaptionParser: Parser = {
     return [
       {
         text: caption,
+        modality: 'caption',
         location: { kind: 'page_section', page: 1, section: 'image-caption' }
       }
     ]
@@ -57,6 +58,7 @@ export function createImageCaptionParser(vlm: VlmClient): Parser {
       return [
         {
           text: caption,
+          modality: 'caption',
           location: { kind: 'page_section', page: 1, section: 'image-caption' }
         }
       ]

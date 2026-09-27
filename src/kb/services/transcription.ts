@@ -1,4 +1,5 @@
 import type { Config } from '../../config.js'
+import type { EffectiveChatConfig } from '../../models/chat-config.js'
 
 export interface TranscriptionSegment {
   startMs: number
@@ -18,14 +19,19 @@ interface TranscriptionResponse {
   segments?: Array<{ start?: number; end?: number; text?: string }>
 }
 
-/** OpenAI-compatible /audio/transcriptions client with segment timestamps. */
+/** OpenAI /audio/transcriptions 或 MiniMax /speech_to_text，统一返回毫秒级片段。 */
 export function createTranscriptionClient(
   cfg?: Config,
-  warn?: (message: string) => void
+  warn?: (message: string) => void,
+  chat?: EffectiveChatConfig
 ): TranscriptionClient {
-  const url = cfg?.transcribeUrl ?? process.env.ECHO_TRANSCRIBE_URL
-  const key = cfg?.transcribeKey ?? process.env.ECHO_TRANSCRIBE_KEY
-  const model = cfg?.transcribeModel ?? process.env.ECHO_TRANSCRIBE_MODEL ?? 'whisper-1'
+  const explicitUrl = cfg?.transcribeUrl ?? process.env.ECHO_TRANSCRIBE_URL
+  const autoMinimax = !explicitUrl && chat?.configured && /minimax-m3/i.test(chat.model ?? '')
+  const url = explicitUrl ?? (autoMinimax ? `${chat!.baseUrl}/speech_to_text` : undefined)
+  const minimax = !!url && /\/speech_to_text\/?$/.test(url)
+  const key = cfg?.transcribeKey ?? process.env.ECHO_TRANSCRIBE_KEY ?? (autoMinimax ? chat?.key ?? undefined : undefined)
+  const configuredModel = cfg?.transcribeModel ?? process.env.ECHO_TRANSCRIBE_MODEL ?? 'whisper-1'
+  const model = minimax && configuredModel === 'whisper-1' ? 'asr-1.0' : configuredModel
   const timeoutMs = cfg?.transcribeTimeoutMs ?? 10 * 60_000
   if (!url) {
     warn?.('未配置音视频转写服务，音频/视频上传将被拒绝')
@@ -46,7 +52,8 @@ export function createTranscriptionClient(
       form.append('file', new Blob([new Uint8Array(buf)], { type: mime }), fileName)
       form.append('model', model)
       form.append('response_format', 'verbose_json')
-      form.append('timestamp_granularities[]', 'segment')
+      if (minimax) form.append('timestamp_level', 'sentence')
+      else form.append('timestamp_granularities[]', 'segment')
       const ctrl = new AbortController()
       const timer = setTimeout(() => ctrl.abort(), timeoutMs)
       let response: Response
@@ -80,6 +87,7 @@ export function createTranscriptionClient(
       if (text) {
         return [{ startMs: 0, endMs: Math.max(0, Math.round((json.duration ?? 0) * 1000)), text }]
       }
+      if (typeof json.text === 'string') return []
       throw new Error('转写服务返回空文本')
     }
   }

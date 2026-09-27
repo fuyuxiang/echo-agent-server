@@ -10,7 +10,7 @@ Echo Agent 企业组织记忆服务端。仓库包含 Fastify API、SQLite 数�
 - 接入：JWT API、OpenAI-compatible chat proxy、SSE 知识问答、MCP、增量同步。
 - 安全：RBAC、scope/密级过滤、ClamAV 故障关闭、服务端密钥加密、管理后台 HttpOnly refresh cookie、CSP、限流、迁移前备份和周期在线备份。
 
-外部模型属于部署依赖，仓库不会伪造模型结果：未配置图片理解或音视频转写时，相应上传会同步返回 503；未配置 OCR 的扫描 PDF 会明确摄取失败；健康接口会列出准确的 `readinessReasons`。
+外部模型属于部署依赖，仓库不会伪造模型结果。配置了 `MiniMax-M3` 聊天模型后，图片理解和扫描 PDF 的逐页识别会复用其多模态接口；音频及视频音轨会复用同一网关的 `asr-1.0` `/v1/speech_to_text` 接口。视频另外抽取最多 24 帧，结合音轨文字建立索引。未配置对应能力时上传会同步返回 503；健康接口会列出 `readinessReasons`。
 
 组织文档上传在技术扫描通过后自动发布并异步建立索引：个人空间由本人上传，团队空间由成员上传，全组织空间由知识管理员或管理员上传。已有的待审核记录仍可在后台处理。提交者可查看和下载自己的原件，也可移除自己的提交；移除已发布文档会立即归档并清除检索索引，原始文件字节保留在持久化存储中。客户端文件夹上传逐个提交支持的文件，并以相对路径作为文档标题。
 
@@ -44,9 +44,9 @@ npm run dev
 | `ECHO_CHAT_MODEL/BASE_URL/KEY` | 新部署的聊天模型；后台数据库配置优先于环境变量。 |
 | `ECHO_EMBED_MODEL/DIM/URL` | 模型默认 `embed-pro`、1024 维；项目环境模板配置 `http://123.56.188.16:8088/v1/embeddings`，无需 Key。未配 URL 时仅有开发用 hash 降级。 |
 | `ECHO_RERANK_MODEL/URL` | 模型默认 `rerank-pro`；项目环境模板配置 `http://123.56.188.16:8088/v1/rerank`，无需 Key。未配 URL 时仅有词汇分数降级。 |
-| `ECHO_OCR_URL/KEY` | 扫描 PDF OCR multipart 接口。 |
-| `ECHO_VLM_URL/KEY/MODEL` | 图片 caption multipart 接口与实际模型名。 |
-| `ECHO_TRANSCRIBE_URL/KEY/MODEL` | 完整的 OpenAI-compatible `/audio/transcriptions` 地址。 |
+| `ECHO_OCR_URL/KEY` | 可选的独立 OCR multipart 接口；未配置时复用已配置的 M3 图片理解。 |
+| `ECHO_VLM_URL/KEY/MODEL` | 可选的独立图片 caption multipart 接口；未配置时复用已配置的 M3 聊天网关。 |
+| `ECHO_TRANSCRIBE_URL/KEY/MODEL` | 可选的独立转写接口。未配置时复用已配置的 M3 网关 `/speech_to_text`，模型使用 `asr-1.0`；显式配置仍支持 OpenAI `/audio/transcriptions`。 |
 | `ECHO_REQUIRE_CHAT/OCR/VLM/TRANSCRIPTION` | 指定生产就绪必须具备的能力。聊天默认必须，其余默认可选。 |
 | `ECHO_AGENTIC_MAX_ROUNDS/QUERIES/REASONING_TIMEOUT_MS/GENERATION_TIMEOUT_MS` | Agentic 检索最大轮次、总查询数、规划/审查与答案生成超时；默认 `3/8/15000/60000`。 |
 | `ECHO_ANTIVIRUS_*` | ClamAV 地址、超时及是否故障关闭。 |
@@ -70,12 +70,11 @@ cp .env.production.example .env.production
 # 配置 .env 中的模型端点，并替换 .env.production 中的部署地址
 ECHO_BOOTSTRAP_ADMIN_PASSWORD='使用强密码' \
 ECHO_CHAT_KEY='...' \
-ECHO_OCR_KEY='...' ECHO_VLM_KEY='...' ECHO_TRANSCRIBE_KEY='...' \
   ./deploy/init-secrets.sh
 docker compose --env-file .env.production up -d --build
 ```
 
-生产镜像内置 ffmpeg。Compose 默认要求聊天、真实嵌入、精排、OCR、VLM、音视频转写和 ClamAV 均配置完成；未满足时服务仍会输出诊断，但不会被标记为 production-ready，Caddy 也不会提前接流量。备份写入可持久化的 `echo_backups` 命名卷，数据库迁移前还会额外自动创建快照；正式灾备应再把该卷定期同步到异机或对象存储。
+生产镜像内置 ffmpeg。Compose 默认要求聊天、真实嵌入、精排、OCR、VLM、音视频转写和 ClamAV 均可用；M3 网关可同时提供前三项多模态能力，无需另配独立 URL。健康检查只验证配置和本地依赖，部署后仍应以实际图片、扫描 PDF、音频和视频上传验证上游接口。备份写入可持久化的 `echo_backups` 命名卷，数据库迁移前还会额外自动创建快照；正式灾备应再把该卷定期同步到异机或对象存储。
 
 如果是不出公网的纯 HTTP 内网部署（不要 Caddy 反代、不做 TLS），用 `deploy/docker-compose.direct.yml` 作为 overlay：
 

@@ -35,13 +35,13 @@ function unitToBlock(u: ParserUnit): Block {
       return { kind: 'heading', level: Number(m[1]), text: u.text, page: loc.page }
     }
     return {
-      kind: loc.section === 'list-item' ? 'list' : 'para',
+      kind: u.modality === 'caption' ? 'caption' : loc.section === 'list-item' ? 'list' : 'para',
       text: u.text,
       page: loc.page
     }
   }
   if (loc.kind === 'timestamp') {
-    return { kind: 'transcript', text: u.text, startMs: loc.startMs, endMs: loc.endMs }
+    return { kind: u.modality === 'caption' ? 'caption' : 'transcript', text: u.text, startMs: loc.startMs, endMs: loc.endMs }
   }
   if (loc.kind === 'sheet_cell') {
     return { kind: 'table', text: u.text }
@@ -170,7 +170,7 @@ export async function parseDocument(
     }
     case 'video': {
       const parser = services?.transcriptionClient
-        ? createVideoParser(services.transcriptionClient)
+        ? createVideoParser(services.transcriptionClient, services.vlmClient)
         : videoParser
       const units = await parser.parse(buf, { docId, fileName })
       return { blocks: units.map(unitToBlock), pageCount: null }

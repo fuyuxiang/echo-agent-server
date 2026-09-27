@@ -7,8 +7,10 @@ export async function sourceCapabilityError(
   deps: Pick<Deps, 'vlmClient' | 'transcriptionClient'>,
   byteSize?: number
 ): Promise<string | null> {
-  if (sourceType === 'image' && !deps.vlmClient.configured) {
-    return '图片理解服务未配置，暂不能上传图片'
+  if ((sourceType === 'image' || sourceType === 'video') && !deps.vlmClient.configured) {
+    return sourceType === 'video'
+      ? '图片理解服务未配置，暂不能解析视频画面'
+      : '图片理解服务未配置，暂不能上传图片'
   }
   if ((sourceType === 'audio' || sourceType === 'video') && !deps.transcriptionClient.configured) {
     return '音视频转写服务未配置，暂不能上传音频或视频'

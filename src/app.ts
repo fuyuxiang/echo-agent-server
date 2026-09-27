@@ -65,10 +65,11 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
 
   const embedder = opts.overrides?.embedder ?? createEmbedder(cfg, warn)
   const reranker = opts.overrides?.reranker ?? createReranker(cfg, warn)
-  const ocrClient = opts.overrides?.ocrClient ?? createOcrClient(cfg, warn)
-  const vlmClient = opts.overrides?.vlmClient ?? createVlmClient(cfg, warn)
+  const chatConfig = resolveChatConfig(db, cfg)
+  const vlmClient = opts.overrides?.vlmClient ?? createVlmClient(cfg, warn, chatConfig)
+  const ocrClient = opts.overrides?.ocrClient ?? createOcrClient(cfg, warn, vlmClient)
   const transcriptionClient = opts.overrides?.transcriptionClient
-    ?? createTranscriptionClient(cfg, warn)
+    ?? createTranscriptionClient(cfg, warn, chatConfig)
   const log = { warn }
 
   // Deps 在此构建,retriever / throttle 后续再补。原因:Retriever 内部持有

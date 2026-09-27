@@ -131,6 +131,9 @@ export function chunkBlocks(blocks: Block[], opts: ChunkOptions = {}): ChunkDraf
       continue
     }
 
+    // 视频的画面说明与音轨转写必须分开，索引才能保留正确 modality。
+    if (buf.length > 0 && modalityOf(buf[0].kind) !== modalityOf(block.kind)) flush()
+
     const bufTokens = buf.reduce((s, b) => s + estimate(b.text), 0)
     const blockTokens = estimate(block.text)
 

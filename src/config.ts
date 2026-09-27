@@ -43,16 +43,15 @@ const Schema = z.object({
   rerankUrl: z.string().optional(),
   rerankKey: z.string().optional(),
 
-  // OCR / VLM 远端服务(可选)。不配则扫描件明确摄取失败、图片入口同步拒绝，
-  // 不会生成伪文本或静默产出空索引。
+  // 可选的独立 OCR / VLM 服务。MiniMax-M3 聊天配置可作为默认视觉通道。
   ocrUrl: z.string().optional(),
   ocrKey: z.string().optional(),
   vlmUrl: z.string().optional(),
   vlmKey: z.string().optional(),
   vlmModel: z.string().optional(),
 
-  // OpenAI-compatible /audio/transcriptions endpoint。音频直接发送，视频
-  // 先由 ffmpeg 抽取音轨。未配置时上传入口会同步拒绝，而不是先显示成功。
+  // 可选的独立转写接口。MiniMax-M3 网关默认使用 /speech_to_text；视频
+  // 先由 ffmpeg 抽取音轨。无转写能力时上传入口同步拒绝。
   transcribeUrl: z.string().optional(),
   transcribeKey: z.string().optional(),
   transcribeModel: z.string().default('whisper-1'),

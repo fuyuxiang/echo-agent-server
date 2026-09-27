@@ -162,4 +162,33 @@ describe('注入式转写解析', () => {
       await rm(dir, { recursive: true, force: true })
     }
   }, 15_000)
+
+  it('视频同时索引画面说明和音轨转写', async () => {
+    if (!(await ffmpegAvailable())) return
+    const dir = await mkdtemp(join(tmpdir(), 'echo-video-vision-test-'))
+    try {
+      const videoPath = join(dir, 'scene.mp4')
+      await execFileAsync('ffmpeg', [
+        '-y', '-f', 'lavfi', '-i', 'color=c=red:s=64x64:d=2',
+        '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2',
+        '-c:v', 'mpeg4', '-c:a', 'aac', '-shortest', videoPath
+      ])
+      const video = await readFile(videoPath)
+      const parser = createVideoParser({
+        configured: true, model: 'asr-1.0',
+        async transcribe() { return [{ startMs: 0, endMs: 1000, text: '视频语音' }] }
+      }, {
+        configured: true, model: 'MiniMax-M3',
+        async caption(_buf, mime) {
+          expect(mime).toBe('image/jpeg')
+          return '红色画面'
+        }
+      })
+      const units = await parser.parse(video, { docId: 'video-vision', fileName: 'scene.mp4' })
+      expect(units.some((unit) => unit.text === '视频语音')).toBe(true)
+      expect(units.some((unit) => unit.text === '红色画面' && unit.modality === 'caption')).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 15_000)
 })

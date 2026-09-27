@@ -9,10 +9,13 @@ import {
   type TranscriptionClient,
   type TranscriptionSegment
 } from '../services/transcription.js'
+import type { VlmClient } from '../services/vlm.js'
 
 const MAX_MEDIA_BYTES = 200 * 1024 * 1024
 export const DIRECT_TRANSCRIPTION_MAX_BYTES = 20 * 1024 * 1024
-const MEDIA_SEGMENT_MS = 60 * 60_000
+// MiniMax asr-1.0 accepts at most 500 seconds per request.
+const MEDIA_SEGMENT_MS = 8 * 60_000
+const MAX_VIDEO_FRAMES = 24
 const audioExtensions = new Set(['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.opus'])
 const videoExtensions = new Set(['.mp4', '.mov', '.mkv', '.webm', '.avi'])
 
@@ -64,17 +67,50 @@ async function transcribeFiles(
   paths: string[]
 ): Promise<TranscriptionSegment[]> {
   const all: TranscriptionSegment[] = []
+  let offset = 0
   for (let index = 0; index < paths.length; index += 1) {
     const audio = await readFile(paths[index])
-    const offset = index * MEDIA_SEGMENT_MS
     const segments = await transcriber.transcribe(audio, `segment-${index}.mp3`, 'audio/mpeg')
     all.push(...segments.map((segment) => ({
       ...segment,
       startMs: segment.startMs + offset,
       endMs: segment.endMs + offset
     })))
+    offset += (await estimateDuration(paths[index])) ?? MEDIA_SEGMENT_MS
   }
   return all
+}
+
+async function hasStream(path: string, kind: 'a' | 'v'): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('ffprobe', [
+      '-v', 'error', '-select_streams', `${kind}:0`, '-show_entries', 'stream=index',
+      '-of', 'csv=p=0', path
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    child.stdout.on('data', (data: Buffer) => { out += data.toString() })
+    child.on('error', reject)
+    child.on('close', (code) => code === 0 ? resolve(!!out.trim()) : reject(new Error('ffprobe 检查媒体轨道失败')))
+  })
+}
+
+async function extractVideoFrames(videoPath: string, workDir: string): Promise<string[]> {
+  const duration = await estimateDuration(videoPath)
+  const interval = Math.max(5, Math.ceil((duration ?? 120_000) / 1000 / MAX_VIDEO_FRAMES))
+  const outputPattern = join(workDir, 'frame-%03d.jpg')
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('ffmpeg', [
+      '-y', '-v', 'error', '-i', videoPath, '-map', '0:v:0',
+      '-vf', `select=isnan(prev_selected_t)+gte(t-prev_selected_t\\,${interval}),scale=1280:720:force_original_aspect_ratio=decrease,format=yuvj420p`,
+      '-fps_mode', 'vfr', '-frames:v', String(MAX_VIDEO_FRAMES), '-q:v', '4', outputPattern
+    ], { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.on('data', (data: Buffer) => { stderr += data.toString() })
+    child.on('error', reject)
+    child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`视频抽帧失败: ${stderr.slice(-300)}`)))
+  })
+  return (await readdir(workDir)).filter((name) => /^frame-\d+\.jpg$/.test(name))
+    .sort().map((name) => join(workDir, name))
 }
 
 let ffmpegProbe: Promise<boolean> | null = null
@@ -131,14 +167,15 @@ export function createAudioParser(transcriber: TranscriptionClient): Parser {
     sourceType: 'audio',
     async parse(buf, meta) {
       checkSize(buf, 'audio')
-      if (buf.length <= DIRECT_TRANSCRIPTION_MAX_BYTES) {
-        const segments = await transcriber.transcribe(buf, meta.fileName, mimeOf(meta.fileName))
-        return blocksToUnits(segmentsToBlocks(segments))
-      }
       const workDir = await mkdtemp(join(tmpdir(), 'echo-audio-'))
       try {
         const inputPath = join(workDir, `audio-${meta.docId}${extOf(meta.fileName)}`)
         await writeFile(inputPath, buf)
+        const duration = await estimateDuration(inputPath)
+        if (buf.length <= DIRECT_TRANSCRIPTION_MAX_BYTES && (duration == null || duration <= MEDIA_SEGMENT_MS)) {
+          const segments = await transcriber.transcribe(buf, meta.fileName, mimeOf(meta.fileName))
+          return blocksToUnits(segmentsToBlocks(segments))
+        }
         const paths = await extractAudioSegments(inputPath, workDir)
         return blocksToUnits(segmentsToBlocks(await transcribeFiles(transcriber, paths)))
       } finally {
@@ -148,7 +185,7 @@ export function createAudioParser(transcriber: TranscriptionClient): Parser {
   }
 }
 
-export function createVideoParser(transcriber: TranscriptionClient): Parser {
+export function createVideoParser(transcriber: TranscriptionClient, vlm?: VlmClient): Parser {
   return {
     sourceType: 'video',
     async parse(buf, meta) {
@@ -157,9 +194,29 @@ export function createVideoParser(transcriber: TranscriptionClient): Parser {
       try {
         const videoPath = join(workDir, `video-${meta.docId}${extOf(meta.fileName)}`)
         await writeFile(videoPath, buf)
-        const paths = await extractAudioSegments(videoPath, workDir)
-        const segments = await transcribeFiles(transcriber, paths)
-        return blocksToUnits(segmentsToBlocks(segments))
+        const units: ParserUnit[] = []
+        if (await hasStream(videoPath, 'a')) {
+          const paths = await extractAudioSegments(videoPath, workDir)
+          units.push(...blocksToUnits(segmentsToBlocks(await transcribeFiles(transcriber, paths))))
+        }
+        if (vlm?.configured && await hasStream(videoPath, 'v')) {
+          const frames = await extractVideoFrames(videoPath, workDir)
+          const duration = await estimateDuration(videoPath)
+          const interval = Math.max(5_000, Math.ceil((duration ?? 120_000) / MAX_VIDEO_FRAMES / 1000) * 1000)
+          for (let i = 0; i < frames.length; i++) {
+            const caption = await vlm.caption(await readFile(frames[i]), 'image/jpeg',
+              '请用中文描述这个视频画面中可见的场景、动作、图表及文字。只描述可见内容，不要推测音频。')
+            units.push({
+              text: caption,
+              modality: 'caption',
+              location: { kind: 'timestamp', startMs: i * interval, endMs: Math.min((i + 1) * interval, duration ?? (i + 1) * interval) }
+            })
+          }
+        }
+        if (units.length === 0) throw new Error('视频未提取到可索引的画面或音轨')
+        return units.sort((a, b) =>
+          (a.location.kind === 'timestamp' ? a.location.startMs : 0) -
+          (b.location.kind === 'timestamp' ? b.location.startMs : 0))
       } finally {
         await rm(workDir, { recursive: true, force: true }).catch(() => {})
       }

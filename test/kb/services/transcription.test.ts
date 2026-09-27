@@ -48,4 +48,32 @@ describe('OpenAI-compatible 音视频转写', () => {
       { startMs: 0, endMs: 3200, text: '整段转写' }
     ])
   })
+
+  it('复用 M3 网关的 MiniMax ASR 路由和句段时间戳', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      text: '会议纪要', duration: 2,
+      segments: [{ start: 0, end: 2, text: '会议纪要' }]
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const client = createTranscriptionClient(testConfig(), undefined, {
+      provider: 'openai-compatible', model: 'MiniMax-M3', baseUrl: 'https://gateway.test/v1',
+      key: 'chat-key', configured: true, source: 'database', credentialError: false
+    })
+    expect(client.configured).toBe(true)
+    expect(client.model).toBe('asr-1.0')
+    await expect(client.transcribe(Buffer.from('audio'), 'clip.mp3', 'audio/mpeg'))
+      .resolves.toEqual([{ startMs: 0, endMs: 2000, text: '会议纪要' }])
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://gateway.test/v1/speech_to_text')
+    expect((init as RequestInit).headers).toEqual({ authorization: 'Bearer chat-key' })
+    const form = (init as RequestInit).body as FormData
+    expect(form.get('timestamp_level')).toBe('sentence')
+    expect(form.get('timestamp_granularities[]')).toBeNull()
+  })
+
+  it('静音音轨返回空段落，供视频画面继续索引', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ text: '', duration: 1 }), { status: 200 })))
+    const client = createTranscriptionClient(testConfig({ transcribeUrl: 'https://speech.test/v1/speech_to_text' }))
+    await expect(client.transcribe(Buffer.from('silent'), 'silent.mp3', 'audio/mpeg')).resolves.toEqual([])
+  })
 })

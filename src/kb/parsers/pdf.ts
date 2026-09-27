@@ -21,13 +21,11 @@ export function createPdfParser(ocr: OcrClient): Parser {
                 desiredWidth: 1800
               })
               const png = screenshot.pages[0]?.data
-              text = png ? await ocr.extractFromImage(Buffer.from(png)) : ''
-              if (text.length < MIN_TEXT_LEN) text = ''
+              const recognized = png ? await ocr.extractFromImage(Buffer.from(png)) : ''
+              if (recognized.trim()) text = recognized.trim()
             } catch {
-              text = ''
+              // OCR 暂时失败时仍保留 PDF 原有的文字层。
             }
-          } else if (text.length < MIN_TEXT_LEN) {
-            text = ''
           }
           if (text) units.push({ text, location: { kind: 'page_section', page: page.num } })
         }

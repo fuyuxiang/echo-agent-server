@@ -22,4 +22,12 @@ describe('上传前摄取能力校验', () => {
   it('未配置转写时明确拒绝音频', async () => {
     await expect(sourceCapabilityError('audio', unavailable)).resolves.toContain('转写')
   })
+
+  it('视频需要画面理解与转写能力', async () => {
+    await expect(sourceCapabilityError('video', unavailable)).resolves.toContain('视频画面')
+    await expect(sourceCapabilityError('video', {
+      ...unavailable,
+      vlmClient: { ...unavailable.vlmClient, configured: true }
+    })).resolves.toContain('转写')
+  })
 })

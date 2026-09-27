@@ -8,6 +8,8 @@ import { createEmbedder } from '../models/embedder.js'
 import { createReranker } from '../models/reranker.js'
 import { resolveChatConfig } from '../models/chat-config.js'
 import { createVlmClient } from '../kb/services/vlm.js'
+import { createOcrClient } from '../kb/services/ocr.js'
+import { createTranscriptionClient } from '../kb/services/transcription.js'
 import { VECTOR_INDEX_DIM } from '../kb/vector-schema.js'
 
 /** PUT 时的 warn,落到 stderr —— 与启动期 createEmbedder/createReranker 保持一致。 */
@@ -196,7 +198,10 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
       app.deps.cfg = newCfg
       app.deps.embedder = createEmbedder(newCfg, hotWarn)
       app.deps.reranker = createReranker(newCfg, hotWarn)
-      app.deps.vlmClient = createVlmClient(newCfg, hotWarn)
+      const newChat = resolveChatConfig(db, newCfg)
+      app.deps.vlmClient = createVlmClient(newCfg, hotWarn, newChat)
+      app.deps.ocrClient = createOcrClient(newCfg, hotWarn, app.deps.vlmClient)
+      app.deps.transcriptionClient = createTranscriptionClient(newCfg, hotWarn, newChat)
 
       app.audit(req, 'config_change', ROW_ID, {
         chatModel: v.chatModel,

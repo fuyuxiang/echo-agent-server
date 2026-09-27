@@ -3,7 +3,7 @@ import { createVlmClient } from '../../../src/kb/services/vlm.js'
 import { testConfig } from '../../../src/config.js'
 
 describe('VLM cfg 注入', () => {
-  afterEach(() => vi.restoreAllMocks())
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
   it('cfg.vlmUrl 未设 → 明确不可用,configured=false', async () => {
     const c = createVlmClient(testConfig())
@@ -74,6 +74,24 @@ describe('VLM cfg 注入', () => {
     const c = createVlmClient(testConfig({ vlmUrl: 'https://vlm.test/v1' }))
     await c.caption(Buffer.from('x'), 'image/png')
     expect(captured.authorization).toBeUndefined()
+  })
+
+  it('复用 M3 聊天配置发送图片并去除思考文本', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: '<think>分析图片</think>\n图片上有一张图表' } }]
+    }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const client = createVlmClient(testConfig(), undefined, {
+      provider: 'openai-compatible', model: 'MiniMax-M3', baseUrl: 'https://gateway.test/v1',
+      key: 'chat-key', configured: true, source: 'database', credentialError: false
+    })
+    expect(client.configured).toBe(true)
+    await expect(client.caption(Buffer.from('png'), 'image/png')).resolves.toBe('图片上有一张图表')
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('https://gateway.test/v1/chat/completions')
+    expect((init as RequestInit).headers).toMatchObject({ authorization: 'Bearer chat-key' })
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body.messages[0].content[1].image_url.url).toBe('data:image/png;base64,cG5n')
   })
 })
 

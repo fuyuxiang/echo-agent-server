@@ -3,6 +3,7 @@ import type { Location, SourceType } from '../types.js'
 export interface ParserUnit {
   text: string
   location: Location
+  modality?: 'caption'
 }
 
 export interface Parser {
