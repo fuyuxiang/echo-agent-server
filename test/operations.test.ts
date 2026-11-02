@@ -87,7 +87,8 @@ describe('knowledge operations and product boundaries', () => {
     it('requires verification and optimistic concurrency before closing maintenance', async () => {
         const created = await app.inject({ method: 'POST', url: '/api/v1/admin/maintenance', headers: bearer(admin), payload: { question: '如何报销？', ownerId: adminId } });
         const id = created.json().data.id;
-        const update = (state: string, version: number) => app.inject({ method: 'PATCH', url: `/api/v1/admin/maintenance/${id}`, headers: bearer(admin), payload: { state, version, note: '已补充制度并通过检索复测' } });
+        memory('verified-maintenance',org());
+        const update = (state: string, version: number) => app.inject({ method: 'PATCH', url: `/api/v1/admin/maintenance/${id}`, headers: bearer(admin), payload: { state, version, note: '已补充制度并通过检索复测',resultAssetId:'verified-maintenance',resultAssetKind:'memory',verificationNote:'实际提问并确认补充材料可以回答报销流程' } });
         expect((await update('closed', 1)).statusCode).toBe(409);
         expect((await update('verified', 1)).statusCode).toBe(200);
         expect((await update('closed', 1)).statusCode).toBe(409);

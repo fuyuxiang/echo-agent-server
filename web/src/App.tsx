@@ -1,3 +1,4 @@
+import RouteErrorBoundary from './components/RouteErrorBoundary'
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 
@@ -15,7 +16,7 @@ const Login = lazy(() => import('./pages/Login'))
 const Documents = lazy(() => import('./pages/Documents'))
 const SecurityChecks = lazy(() => import('./pages/SecurityChecks'))
 const Memories = lazy(() => import('./pages/Memories'))
-const SearchTest = lazy(() => import('./pages/SearchTest'))
+const MemberDetail = lazy(() => import('./pages/MemberDetail'))
 const Users = lazy(() => import('./pages/Users'))
 const Groups = lazy(() => import('./pages/Groups'))
 const ModelConfig = lazy(() => import('./pages/ModelConfig'))
@@ -38,7 +39,7 @@ function RouteLoading() {
 export default function App() {
   return (
     <BrowserRouter>
-      <Suspense fallback={<RouteLoading />}>
+      <RouteErrorBoundary><Suspense fallback={<RouteLoading />}>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route element={<ProtectedRoute />}>
@@ -54,12 +55,13 @@ export default function App() {
               <Route path="/credentials" element={<Credentials />} />
               <Route path="/quotas" element={<Quotas />} />
               <Route path="/users" element={<Users />} />
+              <Route path="/users/:id" element={<MemberDetail />} />
               <Route path="/groups" element={<Groups />} />
               <Route path="/clients" element={<Clients />} />
               <Route path="/enterprise-policy" element={<EnterprisePolicy />} />
               <Route path="/quality" element={<Quality />} />
               <Route path="/jobs" element={<Jobs />} />
-              <Route path="/search" element={<SearchTest />} />
+              <Route path="/search" element={<Navigate to="/quality?tab=test" replace />} />
               <Route path="/audit" element={<Audit />} />
               <Route path="/system" element={<System />} />
               <Route path="/submissions" element={<Navigate to="/workspace" replace />} />
@@ -70,7 +72,7 @@ export default function App() {
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-      </Suspense>
+      </Suspense></RouteErrorBoundary>
     </BrowserRouter>
   )
 }

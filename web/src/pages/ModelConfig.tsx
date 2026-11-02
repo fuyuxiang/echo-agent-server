@@ -1,155 +1,42 @@
-import GatewaySettings from '../components/GatewaySettings'
 import { useEffect, useState } from 'react'
-import { Card, Form, Input, Select, Button, message, Alert, Tag, Space, InputNumber } from 'antd'
+import { Alert, Button, Card, Collapse, Descriptions, Form, Input, InputNumber, Select, Space, Spin, Tag, message } from 'antd'
+import GatewaySettings from '../components/GatewaySettings'
 import * as api from '../api'
+import * as ops from '../api/operations'
 import type { ModelConfig as Cfg } from '../types'
 import { fmtTime } from '../utils/format'
 
-const PROVIDERS = [
-  { value: 'openai', label: 'OpenAI 官方接口' },
-  {
-    value: 'openai-compatible',
-    label: 'OpenAI 兼容服务（模型网关 / Ollama）',
-  },
-]
-
-export default function ModelConfig() {
-  const [form] = Form.useForm()
-  const [cfg, setCfg] = useState<Cfg | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  const load = async (): Promise<void> => {
-    const c = await api.getModelConfig()
-    setCfg(c)
-    form.setFieldsValue({
-      chatProvider: c.chatProvider ?? 'openai-compatible',
-      chatModel: c.chatModel ?? '',
-      chatBaseUrl: c.chatBaseUrl ?? '',
-      embedModel: c.embedModel ?? 'embed-pro',
-      embedDim: c.embedDim ?? 1024,
-      rerankModel: c.rerankModel ?? '',
-      vlmModel: c.vlmModel ?? '',
-    })
-  }
-
-  useEffect(() => { void load().catch(()=>{}) }, [])
-
-  return (
-    <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Alert
-        type="warning"
-        showIcon
-        message="客户端通过服务器网关访问模型"
-        description="组织成员登录后自动获取服务器 Base URL 和绑定自己的访问密钥。上游真实密钥只保存在服务器，用户与内部知识调用统一统计。"
-      />
-
-      <Alert
-        type="warning"
-        showIcon
-        message="更换嵌入模型需要重建全部索引"
-        description="不同模型的向量空间不可混用。改动 embedModel 或 embedDim 后,已有文档需逐一「重建」才能被正确检索。"
-      />
-
-      {/*
-        配置里写的是「打算用什么」,但没配远端地址时跑的是占位实现 ——
-        检索质量差一个量级,最容易被误归因到文档质量上。打开这页就应能看到
-        当前到底是什么,不必等用户报障。
-      */}
-      {cfg?.runtime && !cfg.runtime.productionReady && (
-        <Alert
-          type="error"
-          showIcon
-          message="当前未使用真实模型能力"
-          description={
-            <>
-              嵌入器 {cfg.runtime.semantic ? '✓' : '占位实现'} · 精排{' '}
-              {cfg.runtime.crossEncoder ? '✓' : '占位实现'}。
-              请在服务端配置 <code>ECHO_EMBED_URL</code> 与{' '}
-              <code>ECHO_RERANK_URL</code> 后重启。
-            </>
-          }
-        />
-      )}
-
-      <GatewaySettings />
-      <Card
-        title="上游模型配置"
-        extra={
-          cfg?.updatedAt ? (
-            <span style={{ fontSize: 12, color: 'var(--echo-text-muted)' }}>更新于 {fmtTime(cfg.updatedAt)}</span>
-          ) : null
-        }
-      >
-        <Form
-          form={form}
-          layout="vertical"
-          style={{ maxWidth: 560 }}
-          onFinish={async (v) => {
-            setBusy(true)
-            try {
-              await api.putModelConfig(v)
-              message.success('已保存')
-              await load()
-              // 保存成功后清空 Key 输入框,避免它留在 DOM 里。
-              form.setFieldValue('chatKey', undefined)
-            } catch {
-              // API errors are presented by the shared client.
-            } finally {
-              setBusy(false)
-            }
-          }}
-        >
-          <Form.Item name="chatProvider" label="对话模型服务商" rules={[{ required: true }]}>
-            <Select options={PROVIDERS} />
-          </Form.Item>
-          <Form.Item name="chatModel" label="对话模型" rules={[{ required: true }]}>
-            <Input placeholder="如 gpt-4o / claude-sonnet-4" />
-          </Form.Item>
-          <Form.Item
-            name="chatBaseUrl"
-            label="上游接口基地址"
-            extra="须兼容 OpenAI chat/completions；OpenAI 官方接口可留空"
-          >
-            <Input placeholder="https://..." />
-          </Form.Item>
-          <Form.Item
-            name="chatKey"
-            label={
-              <Space>
-                API Key
-                {cfg?.hasCredential && <Tag color="success">已配置</Tag>}
-              </Space>
-            }
-            extra={cfg?.hasCredential ? '留空则保留现有密钥,填写则覆盖' : '首次配置必填'}
-          >
-            <Input.Password placeholder={cfg?.hasCredential ? '不修改则留空' : 'sk-...'} autoComplete="off" />
-          </Form.Item>
-
-          <Form.Item name="embedModel" label="嵌入模型" rules={[{ required: true }]}>
-            <Input placeholder="embed-pro" />
-          </Form.Item>
-          <Form.Item
-            name="embedDim"
-            label="向量维度"
-            rules={[{ required: true }]}
-            extra="须与嵌入模型实际输出一致,否则检索结果会错乱"
-          >
-            <InputNumber min={1} style={{ width: '100%' }} />
-          </Form.Item>
-          <Form.Item
-            name="rerankModel"
-            label="精排模型"
-            extra="交叉编码器。它是准确率从「能用」到「可信」的分界,建议配置"
-          >
-            <Input placeholder="rerank-pro" />
-          </Form.Item>
-          <Form.Item name="vlmModel" label="图像理解模型" extra="用于给图片、图表生成文字描述">
-            <Input placeholder="可选" />
-          </Form.Item>
-
-          <Button type="primary" htmlType="submit" loading={busy}>保存</Button>
-        </Form>
-      </Card>
-    </Space>
-  )
+export default function ModelConfig(){
+ const [form]=Form.useForm(),[cfg,setCfg]=useState<Cfg|null>(null),[busy,setBusy]=useState(false),[loading,setLoading]=useState(false),[error,setError]=useState(false)
+ const embed=Form.useWatch('embedModel',form),embedChanged=!!cfg&&!!embed&&embed!==cfg.embedModel
+ const load=async()=>{setLoading(true);setError(false);try{const c=await api.getModelConfig();setCfg(c);form.setFieldsValue({chatProvider:c.chatProvider??'openai-compatible',chatModel:c.chatModel??'',chatBaseUrl:c.chatBaseUrl??'',embedModel:c.embedModel??'embed-pro',embedDim:c.embedDim??1024,rerankModel:c.rerankModel??'',vlmModel:c.vlmModel??''})}catch{setError(true)}finally{setLoading(false)}}
+ useEffect(()=>{void load()},[])
+ if(loading&&!cfg)return <Spin/>
+ if(error&&!cfg)return <Alert type="error" message="模型配置加载失败" action={<Button onClick={()=>void load()}>重试</Button>}/>
+ const check=(cfg as any)?.connectionCheck
+ return <Space direction="vertical" size={20} style={{width:'100%'}}>
+  {error&&<Alert type="error" message="刷新失败，请重试" action={<Button onClick={()=>void load()}>刷新</Button>}/>}
+  <Card title="上游连接" extra={<Tag color={check?.success?'success':check?'error':'default'}>{check?.success?'最近验证成功':check?'最近验证未通过':'尚未验证当前配置'}</Tag>}>
+   <p className="echo-help">配置真实模型服务。成员通过服务器网关使用模型，真实上游密钥保存在服务器。</p>
+   {check&&<Alert style={{marginBottom:20}} showIcon type={check.success?'success':'error'} message={check.message} description={`验证于 ${fmtTime(check.checkedAt)} · ${check.latencyMs} ms${check.httpStatus?' · HTTP '+check.httpStatus:''}`} />}
+   <Form form={form} layout="vertical" style={{maxWidth:760}} onFinish={async()=>{setBusy(true);let saved=false;try{
+    await api.putModelConfig(form.getFieldsValue(true));saved=true;form.setFieldValue('chatKey',undefined)
+    const result=await ops.testModel();message[result.success?'success':'warning'](result.success?'配置已保存，实际连接验证成功':'配置已保存，实际连接验证未通过');await load()
+   }catch{if(saved)await load()}finally{setBusy(false)}}}>
+    <Form.Item name="chatProvider" label="接口类型" rules={[{required:true}]}><Select options={[{value:'openai-compatible',label:'OpenAI 兼容服务（含 MiniMax / 模型网关）'},{value:'openai',label:'OpenAI 官方接口'}]}/></Form.Item>
+    <Form.Item name="chatBaseUrl" label="上游 Base URL" extra="填写供应商的兼容 API 地址；OpenAI 官方接口可留空"><Input placeholder="https://供应商地址/v1" autoComplete="off"/></Form.Item>
+    <Form.Item name="chatModel" label="对话模型" rules={[{required:true,message:'请填写上游已授权的模型名称'}]}><Input placeholder="填写供应商提供的模型名称"/></Form.Item>
+    <Form.Item name="chatKey" label={<Space>上游 API Key{cfg?.hasCredential&&<Tag color="success">已保存</Tag>}</Space>} extra={cfg?.hasCredential?'留空保留现有密钥，填写则更新':'首次配置需要填写真实密钥'} rules={cfg?.hasCredential?[]:[{required:true,message:'请填写上游 API Key'}]}><Input.Password autoComplete="off"/></Form.Item>
+    <Collapse style={{marginBottom:20}} items={[{key:'retrieval',label:'知识检索与多模态设置',forceRender:true,children:<>
+     <Descriptions size="small" column={1} items={[{key:'embed',label:'语义检索引擎',children:cfg?.runtime?.semantic?'真实语义模型已配置':'尚未配置真实语义模型'},{key:'rerank',label:'精排引擎',children:cfg?.runtime?.crossEncoder?'真实精排模型已配置':'尚未配置真实精排模型'}]}/>
+     <Form.Item name="embedModel" label="嵌入模型" rules={[{required:true}]}><Input/></Form.Item>
+     <Form.Item name="embedDim" label="当前索引向量维度" extra="维度由现有索引固定；修改维度需要迁移，不能直接热切换。"><InputNumber disabled style={{width:'100%'}}/></Form.Item>
+     {embedChanged&&<Alert type="warning" showIcon message="更换嵌入模型后需要重建文档索引" description="保存后可在文档库批量选择并重建；新模型与旧向量不能混用。" style={{marginBottom:16}}/>}
+     <Form.Item name="rerankModel" label="精排模型"><Input/></Form.Item><Form.Item name="vlmModel" label="图像理解模型"><Input placeholder="可选"/></Form.Item>
+    </>} ]}/>
+    <Button type="primary" htmlType="submit" loading={busy} disabled={!cfg}>保存并验证连接</Button><p className="echo-help">验证会产生一次实际模型调用。保存成功与连接成功分别记录，失败原因保留在上方。</p>
+   </Form>
+  </Card>
+  <GatewaySettings onSaved={async()=>setCfg(await api.getModelConfig())}/>
+ </Space>
 }

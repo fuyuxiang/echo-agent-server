@@ -1,6 +1,7 @@
+import { Link } from 'react-router-dom'
 import { useState } from 'react'
 import {
-  Input, Card, Space, Tag, Empty, Descriptions, Alert, Switch, Typography, Spin,
+  Input, Card, Collapse, Space, Tag, Empty, Descriptions, Alert, Switch, Typography, Spin,
 } from 'antd'
 import * as api from '../api'
 import { memoryKindLabel } from '../utils/format'
@@ -50,7 +51,7 @@ export default function SearchTest() {
         />
         <Space>
           <Switch aria-label="多跳检索" checked={multiHop} onChange={setMultiHop} />
-          <span style={{ fontSize: 13 }}>多跳检索</span>
+          <span style={{ fontSize: 13 }}>深度检索</span>
         </Space>
       </Space>
 
@@ -58,7 +59,7 @@ export default function SearchTest() {
 
       {result && !loading && (
         <>
-          <Card size="small" title="诊断">
+          <Collapse items={[{key:"diagnostics",label:"检索诊断（高级）",children:<>
             <Descriptions size="small" column={3}>
               <Descriptions.Item label="关键词召回">{result.diagnostics.bm25Hits} 条</Descriptions.Item>
               <Descriptions.Item label="语义召回">{result.diagnostics.vecHits} 条</Descriptions.Item>
@@ -86,22 +87,22 @@ export default function SearchTest() {
                 description="若问题里含型号、缩写等精确词却查不到,通常是中文分词或索引问题。"
               />
             )}
-          </Card>
+          </>} ]}/>
 
           {result.memories.length > 0 && (
-            <Card size="small" title="组织记忆">
+            <Card size="small" title="组织经验">
               <Space direction="vertical" style={{ width: '100%' }}>
                 {result.memories.map((m) => (
                   <div key={m.id}>
                     <Tag>{memoryKindLabel(m.kind)}</Tag>
-                    {m.content}
+                    <Link to={`/memories?memoryId=${m.id}`}>{m.content}</Link>
                   </div>
                 ))}
               </Space>
             </Card>
           )}
 
-          {result.chunks.length === 0 ? (
+          {result.chunks.length === 0 && result.memories.length === 0 ? (
             <Empty
               description={
                 <Space direction="vertical">
@@ -117,7 +118,7 @@ export default function SearchTest() {
           ) : (
             <Space direction="vertical" size={8} style={{ width: '100%' }}>
               <Typography.Text type="secondary">
-                「{asked}」命中 {result.chunks.length} 条材料,按相关度排序
+                「{asked}」命中 {result.chunks.length} 个文档片段、{result.memories.length} 条组织经验，按相关度排序
               </Typography.Text>
               {result.chunks.map((c, i) => (
                 <Card
@@ -126,7 +127,7 @@ export default function SearchTest() {
                   title={
                     <Space wrap>
                       <Tag color="blue">[{i + 1}]</Tag>
-                      <span>{c.docTitle}</span>
+                      <Link to={`/documents?docId=${c.docId}`}>{c.docTitle}</Link>
                       {c.citation.page != null && <Tag>第 {c.citation.page} 页</Tag>}
                       {c.citation.heading && (
                         <span style={{ fontSize: 12, color: 'var(--echo-text-muted)', fontWeight: 400 }}>

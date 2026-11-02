@@ -1,3 +1,4 @@
+import SearchTest from './SearchTest'
 import * as ops from '../api/operations'
 import { message, Button, Modal, Tabs } from 'antd'
 import { useNavigate, useSearchParams } from 'react-router-dom'
@@ -19,15 +20,16 @@ import { fmtPercent, fmtTime } from '../utils/format'
  */
 export default function Quality() {
   const [params, setParams] = useSearchParams()
-  return <Tabs activeKey={params.get('tab') === 'maintenance' ? 'maintenance' : 'analysis'} onChange={key => setParams(key === 'maintenance' ? { tab: key } : {})} items={[
+  return <Tabs activeKey={['maintenance','test'].includes(params.get('tab')??'')?params.get('tab')!:'analysis'} onChange={key => setParams(key === 'maintenance' ? { tab: key } : {})} items={[
     { key: 'analysis', label: '质量分析', children: <QualityAnalysis /> },
-    { key: 'maintenance', label: '维护任务', children: <Maintenance /> },
+    { key: 'maintenance', label: '维护清单', children: <Maintenance /> },
+    { key:'test',label:'检索验证',children:<SearchTest/> },
   ]} />
 }
 
 function QualityAnalysis() {
   const nav=useNavigate()
-  const createTask=(question:string)=>Modal.confirm({title:'创建知识维护任务？',content:question,onOk:async()=>{await ops.createMaintenance({question});message.success('已创建维护任务');nav('/quality?tab=maintenance')}})
+  const createTask=(question:string)=>Modal.confirm({title:'创建知识维护任务？',content:question,onOk:async()=>{const task=await ops.createMaintenance({question});message.success(task.dedup?'已有未关闭的维护事项，已定位':'已创建维护事项');nav(`/quality?tab=maintenance&taskId=${task.id}`)}})
   const [days, setDays] = useState(30)
   const [data, setData] = useState<QualityOverview | null>(null)
   const [loading, setLoading] = useState(false)
@@ -71,6 +73,7 @@ function QualityAnalysis() {
       )}
 
       <Alert showIcon type="info" message={`已收到 ${data.feedbackCount??0} 次反馈，覆盖 ${(100*(data.feedbackCoverage??0)).toFixed(1)}% 的问答；负面反馈率按已有反馈计算，未反馈不会计为满意。`}/>
+      {data.total>0&&data.total<20&&<Alert type="info" showIcon message={`当前仅 ${data.total} 条问答，样本有限，不宜据此评价整体知识质量。`}/>}
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} xl={6}>
           <Card>
@@ -81,11 +84,11 @@ function QualityAnalysis() {
           <Card>
             <Statistic
               title="无答案率"
-              value={fmtPercent(data.unansweredRate)}
+              value={data.total?fmtPercent(data.unansweredRate):'—'}
               valueStyle={unansweredHigh ? { color: 'var(--echo-error)' } : undefined}
             />
             <div style={{ fontSize: 12, color: 'var(--echo-text-muted)', marginTop: 4 }}>
-              {unansweredHigh ? '偏高,检查摄取或补充文档' : '正常'}
+              {!data.total?'尚无问答样本':data.total<20?'样本较少，仅作观察':unansweredHigh?'偏高，检查知识内容与处理状态':'按实际问答统计'}
             </div>
           </Card>
         </Col>
@@ -93,7 +96,7 @@ function QualityAnalysis() {
           <Card>
             <Statistic
               title="负面反馈率"
-              value={fmtPercent(data.negativeRate)}
+              value={data.feedbackCount?fmtPercent(data.negativeRate):'—'}
               valueStyle={data.negativeRate > 0.15 ? { color: 'var(--echo-error)' } : undefined}
             />
           </Card>
@@ -102,11 +105,11 @@ function QualityAnalysis() {
           <Card>
             <Statistic
               title="深度检索占比"
-              value={fmtPercent(data.agenticRate)}
+              value={data.total?fmtPercent(data.agenticRate):'—'}
               valueStyle={agenticHigh ? { color: 'var(--echo-warning)' } : undefined}
             />
             <div style={{ fontSize: 12, color: 'var(--echo-text-muted)', marginTop: 4 }}>
-              {agenticHigh ? '超过 25%,客户端判定可能过松' : '正常'}
+              {!data.total?'尚无问答样本':data.total<20?'样本较少，仅作观察':agenticHigh?'深度检索较多，可检查问题复杂度':'按实际检索方式统计'}
             </div>
           </Card>
         </Col>
@@ -182,7 +185,7 @@ function QualityAnalysis() {
           <Card
             size="small"
             title="当前版本从未被引用（全量历史）"
-            extra={<span style={{ fontSize: 12, color: 'var(--echo-text-muted)' }}>候选归档对象</span>}
+            extra={<span style={{ fontSize: 12, color: 'var(--echo-text-muted)' }}>结合上线时间与适用范围评估，勿仅据零引用归档</span>}
           >
             <Table
               scroll={{ x: 440 }}
@@ -192,7 +195,7 @@ function QualityAnalysis() {
               dataSource={data.unusedDocs}
               locale={{ emptyText: '暂无' }}
               columns={[
-                { title: '标题', dataIndex: 'title' },
+                { title: '标题', render:(_:unknown,r:any)=><Button type="link" onClick={()=>nav(`/documents?docId=${r.id}`)}>{r.title}</Button> },
                 { title: '上传时间', dataIndex: 'createdAt', width: 140, render: fmtTime },
               ]}
             />
@@ -200,12 +203,12 @@ function QualityAnalysis() {
         </Col>
       </Row>
 
-      <Card title="知识贡献与复用" extra={<span className="echo-muted">同一回答引用同一逻辑文档仅计一次</span>}><Table scroll={{x:600}} rowKey="id" dataSource={data.contributions??[]} pagination={{pageSize:10}} columns={[{title:'维护人',dataIndex:'displayName'},{title:'当前在库文档',dataIndex:'documents'},{title:'有效经验',dataIndex:'memories'},{title:'已发布技能',dataIndex:'skills'},{title:`近 ${days} 天引用`,dataIndex:'citations'}]}/><p className="echo-muted">贡献量按当前共享知识统计，引用量按所选时间窗口统计；个人知识不参与组织贡献排名。</p></Card>
+      <Card title="知识贡献与复用" extra={<span className="echo-muted">同一回答引用同一逻辑文档仅计一次</span>}><Table scroll={{x:600}} rowKey="id" dataSource={data.contributions??[]} pagination={{pageSize:10}} columns={[{title:'维护人',render:(_:unknown,r:any)=><Button type="link" onClick={()=>nav(`/users/${r.id}`)}>{r.displayName}</Button>},{title:'当前在库文档',dataIndex:'documents'},{title:'有效经验',dataIndex:'memories'},{title:'已发布技能',dataIndex:'skills'},{title:`近 ${days} 天引用`,dataIndex:'citations'}]}/><p className="echo-muted">贡献量按当前共享知识统计，引用量按所选时间窗口统计；个人知识不参与组织贡献排名。</p></Card>
       <Card size="small" title="文档摄取状态分布">
         <Space wrap>
           {data.docStats.map((s) => (
             <Tag key={s.status} color={s.status === 'failed' ? 'error' : s.status === 'ready' ? 'success' : 'default'}>
-              {s.status}: {s.n}
+              {({ready:'可检索',failed:'处理失败',pending:'排队中',parsing:'解析中',chunking:'分块中',embedding:'索引中',archived:'已归档'} as any)[s.status]??s.status}: {s.n}
             </Tag>
           ))}
         </Space>

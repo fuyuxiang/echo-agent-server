@@ -1,3 +1,8 @@
+import { readdir, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { securityRecords, securityAttention } from './security-checks.js';
+import { listDevices, deviceCoverage } from '../operations/devices.js';
+import { findKnowledgeAsset } from '../operations/knowledge-assets.js';
 import JSZip from 'jszip';
 import { assetCount, createFullBackup } from '../operations/backup.js';
 import { deriveKey, decryptSecret } from '../crypto.js';
@@ -14,7 +19,11 @@ export function registerOperationsRoutes(app: FastifyInstance): void {
     const admin = { preHandler: [app.authenticate, requireAdmin] };
     const reviewer = { preHandler: [app.authenticate, requireCurator] };
     app.get('/api/v1/admin/system', admin, async (_req, reply) => {
-        return reply.send(ok({ schemaVersion: db.pragma('user_version', { simple: true }), assets: await assetCount(app.deps.cfg.storageDir), calls: (db.prepare('SELECT COUNT(*) AS n FROM model_calls').get() as any).n, unsettled: (db.prepare("SELECT COUNT(*) AS n FROM model_calls WHERE accounting_state!='complete'").get() as any).n, capabilities: { '语义嵌入': app.deps.embedder.semantic, '交叉编码精排': app.deps.reranker.crossEncoder, '图像理解': app.deps.vlmClient.configured, '文字识别': app.deps.ocrClient.configured, '音频转写': app.deps.transcriptionClient.configured } }));
+        let snapshots:{createdAt:number,bytes:number}[]=[];let backupReadable=true;
+        try{const names=(await readdir(app.deps.cfg.backupDir)).filter(x=>/^echo-.*\.db$/.test(x));snapshots=await Promise.all(names.map(async name=>{const file=await stat(join(app.deps.cfg.backupDir,name));return{createdAt:file.mtimeMs,bytes:file.size}}));snapshots.sort((a,b)=>b.createdAt-a.createdAt)}catch(e){if((e as NodeJS.ErrnoException).code!=='ENOENT')backupReadable=false}
+        const backup={intervalHours:app.deps.cfg.backupIntervalHours,retention:app.deps.cfg.backupRetention,readable:backupReadable,snapshots:snapshots.length,latest:snapshots[0]??null,lastFullGeneratedAt:Number((db.prepare("SELECT value FROM product_metadata WHERE key='last_full_backup_generated_at'").get() as any)?.value)||null};
+
+        return reply.send(ok({ backup,schemaVersion: db.pragma('user_version', { simple: true }), assets: await assetCount(app.deps.cfg.storageDir), antivirusConfigured:!!app.deps.cfg.antivirusHost,calls: (db.prepare('SELECT COUNT(*) AS n FROM model_calls').get() as any).n, unsettled: (db.prepare("SELECT COUNT(*) AS n FROM model_calls WHERE accounting_state!='complete'").get() as any).n, capabilities: { '语义嵌入': app.deps.embedder.semantic, '交叉编码精排': app.deps.reranker.crossEncoder, '图像理解': app.deps.vlmClient.configured, '文字识别': app.deps.ocrClient.configured, '音频转写': app.deps.transcriptionClient.configured } }));
     });
     let backingUp = false;
     app.post('/api/v1/admin/system/backup', admin, async (req, reply) => {
@@ -23,6 +32,7 @@ export function registerOperationsRoutes(app: FastifyInstance): void {
         backingUp = true;
         try {
             const bytes = await createFullBackup(db, app.deps.cfg.storageDir);
+            db.prepare("INSERT INTO product_metadata(key,value) VALUES('last_full_backup_generated_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(Date.now()));
             app.audit(req, 'config_change', 'full_backup', { bytes: bytes.length });
             return reply.header('cache-control', 'no-store').header('content-type', 'application/zip').header('content-disposition', 'attachment; filename="echo-backup.zip"').send(bytes);
         }
@@ -96,13 +106,19 @@ export function registerOperationsRoutes(app: FastifyInstance): void {
         ) WHERE scope_id IN (${placeholders}) AND sensitivity<=? AND ${condition}`).get(...ctx.scopeIds,ctx.clearance) as any).n;
         const operations = {
             safetyPending: safetyCounts("state='pending'"),
-            safetyFailed: safetyCounts("scan_status='failed'"),
+            safetyFailed: (db.prepare(`SELECT COUNT(*) AS n FROM (${securityRecords}) c LEFT JOIN security_dispositions d ON d.kind=c.kind AND d.record_id=c.id WHERE c.scope_id IN (${placeholders}) AND c.sensitivity<=? AND (${securityAttention})`).get(...ctx.scopeIds,ctx.clearance) as any).n,
+            isolated: safetyCounts("scan_status='failed' AND state!='pending'"),
             activeUsers: (db.prepare("SELECT COUNT(*) AS n FROM users WHERE status='active'").get() as any).n,
             failedJobs: (db.prepare(`SELECT COUNT(*) AS n FROM ingest_jobs j JOIN documents d ON d.id=j.doc_id WHERE j.state='failed' AND d.scope_id IN (${placeholders}) AND d.sensitivity<=?`).get(...ctx.scopeIds, ctx.clearance) as any).n,
             unsettledCalls: (db.prepare("SELECT COUNT(*) AS n FROM model_calls WHERE accounting_state IN ('unknown','partial')").get() as any).n,
             openMaintenance: (db.prepare("SELECT COUNT(*) AS n FROM maintenance_tasks WHERE state!='closed'").get() as any).n
         };
-        return reply.send(ok({ documents: stats, memories, pending, recent, operations, updatedAt: Date.now() }));
+        const since=Date.now()-30*86400000;
+        const questions=db.prepare(`SELECT COUNT(*) AS total,COALESCE(SUM(answered=1),0) AS answered,COALESCE(SUM(feedback IS NOT NULL),0) AS feedback FROM qa_events WHERE created_at>=?`).get(since) as any;
+        const cited=db.prepare(`SELECT COUNT(DISTINCT q.id) AS answers,COUNT(DISTINCT d.family_id) AS documents FROM qa_events q,json_each(q.cited_chunks) cited JOIN chunks ch ON ch.id=cited.value JOIN documents d ON d.id=ch.doc_id WHERE q.created_at>=? AND d.scope_id IN (${placeholders}) AND d.sensitivity<=?`).get(since,...ctx.scopeIds,ctx.clearance);
+        const model=db.prepare(`SELECT COUNT(*) AS calls,COALESCE(SUM(outcome='succeeded'),0) AS successful,COALESCE(SUM(total_tokens),0) AS tokens FROM model_calls WHERE started_at>=?`).get(Date.now()-86400000);
+        const connection=db.prepare('SELECT success,http_status AS httpStatus,created_at AS checkedAt,message FROM model_connection_checks WHERE revision=? ORDER BY created_at DESC,rowid DESC LIMIT 1').get(settings(db).revision)??null;
+        return reply.send(ok({ documents: stats, memories, pending, recent, operations,quality:{...questions,cited,windowDays:30},model:{...(model as any),connection},coverage:deviceCoverage(listDevices(db)),updatedAt: Date.now() }));
     });
     }
     app.get('/api/v1/admin/jobs', reviewer, async (req, reply) => {
@@ -133,7 +149,7 @@ export function registerOperationsRoutes(app: FastifyInstance): void {
         return reply.send(ok({ id: next }));
     });
     app.post('/api/v1/client/heartbeat', { preHandler: app.authenticate }, async (req, reply) => {
-        const p = z.object({ deviceId: z.string().min(1).max(200).optional(), name: z.string().max(100).optional(), version: z.string().max(80).optional(), platform: z.string().max(80).optional(), policyVersion: z.number().int().min(0).optional(), configRevision: z.number().int().min(0).optional(), skills: z.array(z.object({ skillId: z.string().max(200), versionId: z.string().max(200), state: z.enum(['installed', 'removed', 'failed']), error: z.string().max(300).optional() })).max(1000).optional() }).safeParse(req.body);
+        const p = z.object({ deviceId: z.string().min(1).max(200).optional(), name: z.string().max(100).optional(), version: z.string().max(80).optional(), platform: z.string().max(80).optional(), policyVersion: z.number().int().min(0).optional(), configRevision: z.number().int().min(0).optional(), capabilities:z.array(z.string().max(80)).max(20).optional(),skillsComplete:z.boolean().optional(), skills: z.array(z.object({ skillId: z.string().max(200), versionId: z.string().max(200),name:z.string().max(100).optional(),version:z.string().max(80).optional(), state: z.enum(['installed', 'removed', 'failed']), error: z.string().max(300).optional() })).max(1000).optional() }).safeParse(req.body);
         if (!p.success)
             return reply.code(400).send(fail(4001, '客户端状态格式错误'));
         const c = (req as AuthedRequest).claims;
@@ -145,18 +161,14 @@ export function registerOperationsRoutes(app: FastifyInstance): void {
         if ((v.policyVersion ?? 0) > policy || (v.configRevision ?? 0) > settings(db).revision)
             return reply.code(400).send(fail(4001, '回执版本高于当前发布版本'));
         db.prepare(`INSERT INTO client_devices(user_id,device_id,name,version,platform,last_seen_at,policy_version,config_revision,receipt_json) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,device_id) DO UPDATE SET name=COALESCE(excluded.name,client_devices.name),version=COALESCE(excluded.version,client_devices.version),platform=COALESCE(excluded.platform,client_devices.platform),last_seen_at=excluded.last_seen_at,policy_version=COALESCE(excluded.policy_version,client_devices.policy_version),config_revision=COALESCE(excluded.config_revision,client_devices.config_revision),receipt_json=COALESCE(excluded.receipt_json,client_devices.receipt_json)`).run(c.sub, device, v.name ?? null, v.version ?? null, v.platform ?? null, Date.now(), v.policyVersion ?? null, v.configRevision ?? null, v.skills ? JSON.stringify(v.skills) : null);
+        db.prepare('UPDATE users SET last_seen_at=? WHERE id=?').run(Date.now(),c.sub);
+        if(v.skills)db.prepare('UPDATE client_devices SET skill_receipt_at=?,skill_receipts_complete=? WHERE user_id=? AND device_id=?').run(Date.now(),v.skillsComplete===undefined?null:v.skillsComplete?1:0,c.sub,device);
+        if(v.capabilities)db.prepare('UPDATE client_devices SET capabilities_json=? WHERE user_id=? AND device_id=?').run(JSON.stringify(v.capabilities),c.sub,device);
         return reply.send(ok({ serverTime: Date.now(), policyVersion: policy, configRevision: settings(db).revision }));
     });
     app.get('/api/v1/admin/devices', admin, async (_req, reply) => {
-        // A successful authenticated sync/config download is a contact, not an installation receipt.
-        const rows = db.prepare(`WITH contacts AS (
-    SELECT user_id,device_id,MAX(created_at) AS seen FROM refresh_tokens GROUP BY user_id,device_id
-    UNION ALL SELECT user_id,device_id,synced_at FROM sync_cursors
-    UNION ALL SELECT user_id,device_id,COALESCE(last_used_at,created_at) FROM api_keys WHERE device_id IS NOT NULL
-    UNION ALL SELECT user_id,device_id,last_seen_at FROM client_devices
-  ), devices AS (SELECT user_id,device_id,MAX(seen) AS lastContact FROM contacts GROUP BY user_id,device_id)
-  SELECT d.user_id AS userId,u.display_name AS displayName,u.username,u.status AS userStatus,d.device_id AS deviceId,d.lastContact,c.name,c.version,c.platform,c.last_seen_at AS heartbeatAt,c.policy_version AS policyVersion,c.config_revision AS configRevision,c.receipt_json AS receiptJson FROM devices d JOIN users u ON u.id=d.user_id LEFT JOIN client_devices c ON c.user_id=d.user_id AND c.device_id=d.device_id ORDER BY d.lastContact DESC LIMIT 2000`).all();
-        return reply.send(ok({ items: rows, policyVersion: (db.prepare("SELECT version FROM enterprise_policy WHERE id='default'").get() as any).version, configRevision: settings(db).revision }));
+        const items=listDevices(db);
+        return reply.send(ok({items,coverage:deviceCoverage(items),policyVersion:(db.prepare("SELECT version FROM enterprise_policy WHERE id='default'").get() as any).version,configRevision:settings(db).revision}));
     });
     app.post('/api/v1/admin/devices/revoke', admin, async (req, reply) => {
         const p = z.object({ userId: z.string(), deviceId: z.string() }).safeParse(req.body);
@@ -168,21 +180,25 @@ export function registerOperationsRoutes(app: FastifyInstance): void {
         return reply.send(ok({ revoked: true }));
     });
     app.get('/api/v1/admin/maintenance', admin, async (_req, reply) => {
-        return reply.send(ok(db.prepare(`SELECT t.*,u.display_name AS ownerName FROM maintenance_tasks t LEFT JOIN users u ON u.id=t.owner_id ORDER BY t.updated_at DESC LIMIT 1000`).all()));
+        const ctx=ctxFor(_req);
+        const tasks=db.prepare(`SELECT t.*,u.display_name AS ownerName,(u.role='admin' AND u.status='active') AS ownerCanManage FROM maintenance_tasks t LEFT JOIN users u ON u.id=t.owner_id ORDER BY t.updated_at DESC LIMIT 1000`).all() as any[];
+        return reply.send(ok(tasks.map(t=>({...t,resultAsset:t.result_asset_id?findKnowledgeAsset(db,ctx,t.result_asset_id,t.result_asset_kind??undefined):null,verification:t.verification_json?JSON.parse(t.verification_json):null}))));
     });
     app.post('/api/v1/admin/maintenance', admin, async (req, reply) => {
         const p = z.object({ question: z.string().trim().min(1).max(4000), sourceEventId: z.string().optional(), ownerId: z.string().nullable().optional(), note: z.string().max(4000).optional() }).safeParse(req.body);
         if (!p.success)
             return reply.code(400).send(fail(4001, '维护任务参数错误'));
-        if (p.data.ownerId && !db.prepare("SELECT 1 FROM users WHERE id=? AND status='active'").get(p.data.ownerId))
-            return reply.code(400).send(fail(4001, '负责人不存在或已禁用'));
+        if (p.data.ownerId && !db.prepare("SELECT 1 FROM users WHERE id=? AND status='active' AND role='admin'").get(p.data.ownerId))
+            return reply.code(400).send(fail(4001, '负责人须为启用的管理员，普通成员通过客户端补充知识'));
+        const existing=db.prepare("SELECT id FROM maintenance_tasks WHERE question=? AND state!='closed' ORDER BY created_at LIMIT 1").get(p.data.question) as any;
+        if(existing)return reply.send(ok({id:existing.id,dedup:true}));
         const id = randomUUID();
-        db.prepare('INSERT INTO maintenance_tasks(id,question,source_event_id,owner_id,note,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run(id, p.data.question, p.data.sourceEventId ?? null, p.data.ownerId ?? null, p.data.note ?? null, (req as AuthedRequest).claims.sub, Date.now(), Date.now());
+        db.prepare('INSERT INTO maintenance_tasks(id,question,source_event_id,owner_id,note,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run(id, p.data.question, p.data.sourceEventId ?? null, p.data.ownerId ?? (req as AuthedRequest).claims.sub, p.data.note ?? null, (req as AuthedRequest).claims.sub, Date.now(), Date.now());
         app.audit(req, 'maintenance_change', id, { created: true });
         return reply.send(ok({ id }));
     });
     app.patch('/api/v1/admin/maintenance/:id', admin, async (req, reply) => {
-        const p = z.object({ version: z.number().int(), state: z.enum(['open', 'working', 'verified', 'closed']), note: z.string().max(4000), resultAssetId: z.string().nullable().optional(), ownerId: z.string().nullable().optional() }).safeParse(req.body);
+        const p = z.object({ version: z.number().int(), state: z.enum(['open', 'working', 'verified', 'closed']), note: z.string().max(4000), resultAssetId: z.string().nullable().optional(), resultAssetKind:z.enum(['document','memory','skill']).nullable().optional(),verificationNote:z.string().trim().min(5).max(4000).optional(), ownerId: z.string().nullable().optional() }).safeParse(req.body);
         if (!p.success)
             return reply.code(400).send(fail(4001, '任务参数错误'));
         const { id } = req.params as {
@@ -197,9 +213,19 @@ export function registerOperationsRoutes(app: FastifyInstance): void {
             return reply.code(409).send(fail(4091, '请先复测并标记验证通过，再关闭任务'));
         if (['verified', 'closed'].includes(p.data.state) && !p.data.note.trim())
             return reply.code(400).send(fail(4001, '请填写复测记录'));
-        if (p.data.ownerId && !db.prepare("SELECT 1 FROM users WHERE id=? AND status='active'").get(p.data.ownerId))
-            return reply.code(400).send(fail(4001, '负责人不存在或已禁用'));
-        db.prepare('UPDATE maintenance_tasks SET state=?,note=?,result_asset_id=?,owner_id=?,updated_at=?,version=version+1 WHERE id=? AND version=?').run(p.data.state, p.data.note, p.data.resultAssetId ?? row.result_asset_id, p.data.ownerId === undefined ? row.owner_id : p.data.ownerId, Date.now(), id, p.data.version);
+        if (p.data.ownerId && !db.prepare("SELECT 1 FROM users WHERE id=? AND status='active' AND role='admin'").get(p.data.ownerId))
+            return reply.code(400).send(fail(4001, '负责人须为启用的管理员，普通成员通过客户端补充知识'));
+        const nextAsset=p.data.resultAssetId===undefined?row.result_asset_id:p.data.resultAssetId;
+        const nextKind=p.data.resultAssetKind===undefined?row.result_asset_kind:p.data.resultAssetKind;
+        if(nextAsset&&!findKnowledgeAsset(db,ctxFor(req),nextAsset,nextKind??undefined))return reply.code(400).send(fail(4001,'关联知识不存在、不可见或尚未发布'));
+        let verification=row.verification_json;
+        if(nextAsset!==row.result_asset_id||nextKind!==row.result_asset_kind)verification=null;
+        if(p.data.verificationNote)verification=JSON.stringify({method:'manual',at:Date.now(),note:p.data.verificationNote,actorId:(req as AuthedRequest).claims.sub,assetId:nextAsset,assetKind:nextKind});
+        if(['verified','closed'].includes(p.data.state)){
+            let proof:any=null;try{proof=verification?JSON.parse(verification):null}catch{}
+            if(!nextAsset||!proof||(proof.method==='retrieval'?!proof.matched:!proof.note||proof.note.trim().length<5))return reply.code(400).send(fail(4001,'请关联已发布知识，并完成检索复测或填写实际人工复测依据'));
+        }
+        db.prepare(`UPDATE maintenance_tasks SET closure_reason=CASE WHEN ?='closed' THEN 'verified' ELSE NULL END,state=?,note=?,result_asset_id=?,result_asset_kind=?,verification_json=?,owner_id=?,updated_at=?,version=version+1 WHERE id=? AND version=?`).run(p.data.state,p.data.state,p.data.note,nextAsset??null,nextKind??null,verification,p.data.ownerId===undefined?row.owner_id:p.data.ownerId,Date.now(),id,p.data.version);
         app.audit(req, 'maintenance_change', id, { state: p.data.state });
         return reply.send(ok({ updated: true }));
     });
@@ -251,11 +277,11 @@ export function registerOperationsRoutes(app: FastifyInstance): void {
         const own = db.prepare(`SELECT id,title AS label,state,review_note AS note,COALESCE(reviewed_at,created_at) AS at FROM document_submissions WHERE submitter_id=? AND state IN ('approved','rejected','scan_failed','ingest_failed') ORDER BY at DESC LIMIT 50`).all(claims.sub) as any[];
         own.forEach(r => entries.push({ id: `doc-${r.id}-${r.state}`, title: `文档「${r.label}」${r.state === 'approved' ? '已通过' : '需要处理'}`, description: r.note ?? '', at: r.at, path: claims.role === 'member' ? '/submissions' : '/documents' }));
         const promotions = db.prepare("SELECT id,state,review_note AS note,COALESCE(reviewed_at,created_at) AS at FROM promotions WHERE submitter_id=? AND state IN ('approved','rejected') ORDER BY at DESC LIMIT 50").all(claims.sub) as any[];
-        promotions.forEach(r => entries.push({ id: `memory-${r.id}-${r.state}`, title: `经验提交${r.state === 'approved' ? '已通过' : '已退回'}`, description: r.note ?? '', at: r.at, path: claims.role === 'member' ? '/submissions' : '/memories' }));
+        promotions.forEach(r => entries.push({ id: `memory-${r.id}-${r.state}`, title: `经验提交${r.state === 'approved' ? '已通过' : '安全检查未通过'}`, description: r.note ?? '', at: r.at, path: claims.role === 'member' ? '/submissions' : '/memories' }));
         if (claims.role !== 'member') {
             const n = (db.prepare(`SELECT COUNT(*) AS n FROM document_submissions WHERE state='pending' AND target_scope IN (${marks}) AND sensitivity<=?`).get(...args, ctx.clearance) as any).n;
             if (n)
-                entries.push({ id: `review-doc-${n}`, title: `${n} 份文档等待审核`, description: '查看扫描结果、预览内容并作出审核决定', at: Date.now(), path: '/review' });
+                entries.push({ id: `review-doc-${n}`, title: `${n} 份文档正在自动检查`, description: '安全检查通过后自动发布；检查服务故障会自动重试', at: Date.now(), path: '/security?view=attention' });
             const failed = (db.prepare(`SELECT COUNT(*) AS n FROM documents WHERE status='failed' AND scope_id IN (${marks}) AND sensitivity<=?`).get(...args, ctx.clearance) as any).n;
             if (failed)
                 entries.push({ id: `failed-${failed}`, title: `${failed} 份文档处理失败`, description: '查看错误原因并重试', at: Date.now(), path: '/jobs' });

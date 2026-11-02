@@ -55,6 +55,8 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
     const e = app.deps.embedder
     const r = app.deps.reranker
     return {
+      revision: settings(db).revision,
+      connectionCheck: db.prepare('SELECT success,http_status AS httpStatus,latency_ms AS latencyMs,message,created_at AS checkedAt FROM model_connection_checks WHERE revision=? ORDER BY created_at DESC,rowid DESC LIMIT 1').get(settings(db).revision)??null,
       runtime: {
         embedder: e.model,
         embedDim: e.dim,

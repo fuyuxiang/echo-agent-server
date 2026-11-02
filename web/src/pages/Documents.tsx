@@ -1,3 +1,4 @@
+import { useSearchParams } from 'react-router-dom'
 import DocumentDetail from '../components/DocumentDetail'
 import client from '../api/client'
 import { useEffect, useState, useCallback, useRef } from 'react'
@@ -25,8 +26,10 @@ const STATUS_META: Record<DocStatus, { color: string; label: string }> = {
 const IN_PROGRESS: DocStatus[] = ['pending', 'parsing', 'chunking', 'embedding']
 
 export default function Documents() {
+  const [search,setSearch]=useSearchParams()
+  useEffect(()=>{const id=search.get('docId');if(id)void api.getDoc(id).then(setDetail).catch(()=>{})},[search.get('docId')])
   const [detail,setDetail]=useState<DocumentItem|null>(null)
-  const [statusFilter,setStatusFilter]=useState<string>()
+  const [statusFilter,setStatusFilter]=useState<string|undefined>(search.get('status')??undefined)
   const [selected,setSelected]=useState<React.Key[]>([])
   const sequence=useRef(0)
   const [items, setItems] = useState<DocumentItem[]>([])
@@ -257,7 +260,7 @@ export default function Documents() {
         onDone={() => { setUploadOpen(false); void load() }}
       />
       </>}
-      <DocumentDetail doc={detail} onClose={()=>setDetail(null)} onChanged={()=>{void load()}} onPreview={doc=>{void openPreview(doc)}}/>
+      <DocumentDetail doc={detail} onClose={()=>{setDetail(null);const next=new URLSearchParams(search);next.delete('docId');setSearch(next,{replace:true})}} onChanged={()=>{void load()}} onPreview={doc=>{void openPreview(doc)}}/>
       <Modal open={!!preview} title={preview?.title} onCancel={() => setPreview(null)} footer={
         <Space>
           {preview?.hasMore && <Button loading={previewLoading} onClick={() => void morePreview()}>加载后续内容</Button>}
@@ -337,7 +340,7 @@ function UploadModal({
         <Form.Item name="sensitivity" label="密级" extra="用户只能检索到不高于自身权限的文档">
           <Select
             options={[
-              { value: 0, label: '公开' },
+              { value: 0, label: '组织内公开' },
               { value: 1, label: '内部' },
               { value: 2, label: '机密' },
             ]}

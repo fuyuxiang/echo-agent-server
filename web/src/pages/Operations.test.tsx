@@ -29,7 +29,7 @@ describe('new administration workflows',()=>{
  })
  it('shows actual usage and unresolved accounting separately for the organization',async()=>{
   vi.mocked(ops.getUsage).mockResolvedValue({summary:{totalTokens:1234,inputTokens:1000,outputTokens:234,calls:2,unsettled:1},costs:[],rankings:[{userId:'u',username:'member',displayName:'成员',totalTokens:1234,inputTokens:1000,outputTokens:234,calls:2,unsettled:1}],departments:[],sources:[],trend:[],items:[],updatedAt:Date.now()})
-  render(<Usage/>);expect(await screen.findByText('未完整结算')).toBeInTheDocument()
+  render(<MemoryRouter><Usage/></MemoryRouter>);expect(await screen.findByText('未完整结算')).toBeInTheDocument()
   expect(screen.getByText('全部用户')).toBeInTheDocument()
   expect(screen.getByText('尚无可估算费用',{exact:false})).toBeInTheDocument()
  })

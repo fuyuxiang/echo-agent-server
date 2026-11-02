@@ -1,10 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Layout, Menu, Dropdown, Avatar, Breadcrumb, Button, Drawer, Grid, Tag, Tooltip } from 'antd'
 import type { MenuProps } from 'antd'
 import {
-  FileTextOutlined, BulbOutlined, SearchOutlined,
-  DashboardOutlined, UserOutlined, TeamOutlined, SettingOutlined,
-  LogoutOutlined, SafetyOutlined, MenuFoldOutlined, MenuUnfoldOutlined,
+  FileTextOutlined,
+  UserOutlined, TeamOutlined, SettingOutlined,
+  LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined,
   MoreOutlined, AppstoreOutlined, ApartmentOutlined, RobotOutlined,
 } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router-dom'
@@ -26,19 +26,19 @@ const PAGE_META: Record<string, { group: string; title: string; description: str
   '/credentials': { group: '模型服务', title: '用户密钥', description: '管理分配给用户与设备的模型访问凭证。' },
   '/quotas': { group: '模型服务', title: '用量配额', description: '设置资源使用边界，让模型服务稳定可控。' },
   '/skills': { group: '知识资产', title: '技能库', description: '管理可复用的工作能力、版本与分发策略。' },
-  '/jobs': { group: '运行与质量', title: '处理任务', description: '追踪文档解析与索引任务，定位失败原因并重试。' },
-  '/clients': { group: '运行与质量', title: '客户端状态', description: '查看设备联系、配置确认与技能安装回执。' },
-  '/system': { group: '运行与质量', title: '运行与备份', description: '了解服务器能力，安全备份知识资产与管理数据。' },
-  '/security': { group: '管理控制台', title: '安全检查', description: '自动检查文档与技能风险，追踪发布状态和拦截原因。' },
+  '/jobs': { group: '系统管理', title: '处理任务', description: '追踪文档解析与索引任务，定位失败原因并重试。' },
+  '/clients': { group: '系统管理', title: '设备与同步', description: '查看设备联系、配置确认与技能安装回执。' },
+  '/system': { group: '系统管理', title: '运行与备份', description: '了解服务器能力，安全备份知识资产与管理数据。' },
+  '/security': { group: '系统管理', title: '安全与隔离', description: '自动检查文档与技能风险，追踪发布状态和拦截原因。' },
   '/documents': { group: '知识资产', title: '文档', description: '集中管理组织文档，为团队提供可检索、可追溯的知识。' },
   '/memories': { group: '知识资产', title: '组织经验', description: '沉淀团队共识与实践经验，让每一次协作都有据可循。' },
-  '/users': { group: '成员与客户端', title: '用户', description: '管理组织成员、角色与知识访问权限。' },
-  '/groups': { group: '成员与客户端', title: '部门与分组', description: '按团队组织成员，为知识设置合适的可见范围。' },
+  '/users': { group: '成员与设备', title: '成员管理', description: '管理组织成员、角色与知识访问权限。' },
+  '/groups': { group: '成员与设备', title: '部门与访问分组', description: '按团队组织成员，为知识设置合适的可见范围。' },
   '/model-config': { group: '模型服务', title: '模型配置', description: '统一配置组织的对话、嵌入与精排模型。' },
-  '/enterprise-policy': { group: '成员与客户端', title: '客户端策略', description: '管理桌面客户端的知识与技能使用策略。' },
-  '/search': { group: '运行与质量', title: '检索自测', description: '从真实问题出发，验证知识召回与检索效果。' },
-  '/quality': { group: '运行与质量', title: '知识质量', description: '分析知识使用与回答质量，跟进问题处理和复测结果。' },
-  '/audit': { group: '运行与质量', title: '审计日志', description: '追踪组织内的关键操作，保留完整的管理记录。' },
+  '/enterprise-policy': { group: '成员与设备', title: '客户端策略', description: '管理桌面客户端的知识与技能使用策略。' },
+  '/search': { group: '系统管理', title: '检索自测', description: '从真实问题出发，验证知识召回与检索效果。' },
+  '/quality': { group: '知识资产', title: '质量改进', description: '分析知识使用与回答质量，跟进问题处理和复测结果。' },
+  '/audit': { group: '系统管理', title: '审计日志', description: '追踪组织内的关键操作，保留完整的管理记录。' },
 }
 
 export default function AppLayout() {
@@ -51,35 +51,30 @@ export default function AppLayout() {
   const screens = Grid.useBreakpoint()
   const isMobile = screens.lg === false
   const compact = collapsed && !isMobile
-  const page = PAGE_META[loc.pathname] ?? PAGE_META['/documents']
+  const normalizedPath=loc.pathname.startsWith('/users/')?'/users':loc.pathname
+  const page = PAGE_META[normalizedPath] ?? PAGE_META['/workspace']
+  const groupFor=(path:string)=>['/documents','/memories','/skills','/quality'].includes(path)?'knowledge':['/users','/groups','/clients','/enterprise-policy'].includes(path)?'members':['/model-config','/usage','/credentials','/quotas'].includes(path)?'models':['/security','/jobs','/audit','/system'].includes(path)?'system':null
+  const [openKeys,setOpenKeys]=useState<string[]>(()=>groupFor(normalizedPath)?[groupFor(normalizedPath)!]:[])
+  useEffect(()=>{const key=groupFor(normalizedPath);setOpenKeys(key?[key]:[])},[normalizedPath])
 
   const items: MenuProps['items'] = [
-    { key: '/workspace', icon: <AppstoreOutlined />, label: '概览' },
-    { key: '/security', icon: <SafetyOutlined />, label: '安全检查' },
-    { key: 'knowledge', type: 'group', label: '知识资产', children: [
-      { key: '/documents', icon: <FileTextOutlined />, label: '文档' },
-      { key: '/memories', icon: <BulbOutlined />, label: '组织经验' },
-      { key: '/skills', icon: <RobotOutlined />, label: '技能库' },
-    ] },
-    { key: 'models', type: 'group', label: '模型服务', children: [
-      { key: '/model-config', icon: <RobotOutlined />, label: '模型配置' },
-      { key: '/usage', icon: <DashboardOutlined />, label: '用量与排名' },
-      { key: '/credentials', icon: <SafetyOutlined />, label: '用户密钥' },
-      { key: '/quotas', icon: <SettingOutlined />, label: '用量配额' },
-    ] },
-    { key: 'members', type: 'group', label: '成员与客户端', children: [
-      { key: '/users', icon: <UserOutlined />, label: '用户' },
-      { key: '/groups', icon: <TeamOutlined />, label: '部门与分组' },
-      { key: '/clients', icon: <TeamOutlined />, label: '客户端状态' },
-      { key: '/enterprise-policy', icon: <SettingOutlined />, label: '客户端策略' },
-    ] },
-    { key: 'operations', type: 'group', label: '运行与质量', children: [
-      { key: '/quality', icon: <DashboardOutlined />, label: '知识质量' },
-      { key: '/jobs', icon: <FileTextOutlined />, label: '处理任务' },
-      { key: '/search', icon: <SearchOutlined />, label: '检索自测' },
-      { key: '/audit', icon: <SafetyOutlined />, label: '审计日志' },
-      { key: '/system', icon: <SettingOutlined />, label: '运行与备份' },
-    ] },
+    {key:'/workspace',icon:<AppstoreOutlined/>,label:'概览'},
+    {key:'knowledge',icon:<FileTextOutlined/>,label:'知识资产',children:[
+      {key:'/documents',label:'文档库'}, {key:'/memories',label:'组织经验'},
+      {key:'/skills',label:'技能库'}, {key:'/quality',label:'质量改进'},
+    ]},
+    {key:'members',icon:<TeamOutlined/>,label:'成员与设备',children:[
+      {key:'/users',label:'成员管理'}, {key:'/groups',label:'部门与访问分组'},
+      {key:'/clients',label:'设备与同步'}, {key:'/enterprise-policy',label:'客户端策略'},
+    ]},
+    {key:'models',icon:<RobotOutlined/>,label:'模型服务',children:[
+      {key:'/model-config',label:'连接与配置'}, {key:'/usage',label:'用量与排名'},
+      {key:'/quotas',label:'配额管理'}, {key:'/credentials',label:'访问密钥'},
+    ]},
+    {key:'system',icon:<SettingOutlined/>,label:'系统管理',children:[
+      {key:'/system',label:'运行与备份'}, {key:'/security',label:'安全与隔离'},
+      {key:'/jobs',label:'处理任务'}, {key:'/audit',label:'审计日志'},
+    ]},
   ]
 
   const logout = async (): Promise<void> => {
@@ -108,7 +103,9 @@ export default function AppLayout() {
         <Menu
           mode="inline"
           inlineCollapsed={compact}
-          selectedKeys={[loc.pathname]}
+          selectedKeys={[normalizedPath]}
+          openKeys={compact?undefined:openKeys}
+          onOpenChange={keys=>setOpenKeys(keys.filter(k=>!openKeys.includes(k)).slice(-1).length?keys.filter(k=>!openKeys.includes(k)).slice(-1):keys)}
           items={items}
           onClick={(e) => { nav(e.key); setMobileOpen(false) }}
         />

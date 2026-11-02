@@ -52,10 +52,12 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       'm.sensitivity <= ?'
     ]
     const params: unknown[] = [...ctx.scopeIds, ctx.clearance]
+    if(q.id){where.push('m.id=?');params.push(q.id)}
     if (q.kind) { where.push('m.kind = ?'); params.push(q.kind) }
     if (q.scope) { where.push('m.scope_id = ?'); params.push(q.scope) }
     where.push(q.status ? 'm.status = ?' : "m.status = 'active'")
     if (q.status) params.push(q.status)
+    if(q.expired==='true'){where.push('m.valid_until IS NOT NULL AND m.valid_until<?');params.push(Date.now())}
     if (q.q) { where.push('m.content LIKE ?'); params.push(`%${q.q}%`) }
 
     const paging=q.page!==undefined

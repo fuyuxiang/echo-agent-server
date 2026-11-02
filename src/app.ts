@@ -1,3 +1,4 @@
+import { registerAdministrationRoutes } from './routes/administration.js'
 import { registerSecurityCheckRoutes } from './routes/security-checks.js'
 import { registerReviewLocks } from './operations/review-lock.js'
 import { usageContext } from './gateway/usage.js'
@@ -258,6 +259,7 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   registerLlmRoutes(app)
   registerGatewayAdminRoutes(app)
   registerOperationsRoutes(app)
+  registerAdministrationRoutes(app)
   registerSecurityCheckRoutes(app)
   registerSyncRoutes(app)
   registerQualityRoutes(app)

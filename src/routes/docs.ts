@@ -16,6 +16,7 @@ const ListQuery = z.object({
   scopeId: z.string().optional(),
   status: z.string().optional(),
   q: z.string().optional(),
+  stale:z.enum(['true','false']).optional(),
   tag: z.string().optional().describe('按标签精确筛选'),
   view: z.enum(['accessible', 'manage']).default('accessible'),
   page: z.coerce.number().int().min(1).default(1),
@@ -213,6 +214,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       where.push('d.title LIKE ?')
       params.push(`%${q}%`)
     }
+    if(parsed.data.stale==='true'){where.push("d.volatility='volatile' AND d.updated_at<?");params.push(Date.now()-90*86400000)}
     if (tag) {
       // 标签筛选走 EXISTS 而非 IN 子查询,SQLite planner 会更愿意走 doc_tags.tag
       // 上的索引(就算没有专门建索引,doc_tags 也很小,N+1 可避免)。
@@ -516,6 +518,11 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       if(v.sensitivity!==undefined&&v.sensitivity>ctx.clearance)return reply.code(403).send(fail(4031,'不能设置高于自身权限的密级'))
       if(v.ownerId&&!db.prepare("SELECT 1 FROM users WHERE id=? AND status='active'").get(v.ownerId))return reply.code(400).send(fail(4001,'维护人不存在或已停用'))
 
+      if(v.ownerId){
+        const target=db.prepare('SELECT role FROM users WHERE id=?').get(v.ownerId) as any;
+        const access=loadManagementContext(db,v.ownerId,target.role);
+        if(!access.scopeIds.includes(v.scopeId??current.scopeId)||access.clearance<(v.sensitivity??current.sensitivity))return reply.code(400).send(fail(4001,'所选维护人无权访问调整后的文档，请先配置成员权限'));
+      }
       // scope 与 sensitivity 调整是授权边界变化,不允许 curator 跨范围移动
       // 或扩大可见性 —— 否则一个可访问某文档的 curator 可以把文档移入
       // 其他团队、或把"机密"降到"公开"。仅 admin 可改这两项。
@@ -574,6 +581,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
             id
           )
         }
+        if(v.ownerId!==undefined)db.prepare('UPDATE documents SET owner_id=? WHERE family_id=(SELECT family_id FROM documents WHERE id=?)').run(v.ownerId,id);
         if (v.tags) {
           db.prepare('DELETE FROM doc_tags WHERE doc_id = ?').run(id)
           for (const tag of v.tags) {

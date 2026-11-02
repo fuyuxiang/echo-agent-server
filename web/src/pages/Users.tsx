@@ -1,7 +1,8 @@
+import { Link, useNavigate } from 'react-router-dom'
 import { useEffect, useState, useCallback } from 'react'
 import {
   Table, Button, Modal, Form, Input, Select, Tag, Space, Switch, message,
-  Popconfirm, Tooltip, Alert,
+  Popconfirm, Tooltip,
 } from 'antd'
 import { PlusOutlined, KeyOutlined, DisconnectOutlined } from '@ant-design/icons'
 import * as api from '../api'
@@ -16,12 +17,14 @@ const ROLE_META: Record<Role, { color: string; label: string; hint: string }> = 
 }
 
 const CLEARANCE = [
-  { value: 0, label: '公开' },
+  { value: 0, label: '组织内公开' },
   { value: 1, label: '内部' },
   { value: 2, label: '机密' },
 ]
 
 export default function Users() {
+  const nav=useNavigate()
+  const [keyword,setKeyword]=useState(''),[status,setStatus]=useState<string>(),[department,setDepartment]=useState<string>()
   const [users, setUsers] = useState<User[]>([])
   const [groups, setGroups] = useState<Group[]>([])
   const [loading, setLoading] = useState(false)
@@ -71,7 +74,7 @@ export default function Users() {
       render: (_: unknown, r: User) => (
         <Space direction="vertical" size={0}>
           <span>
-            {r.displayName}
+            <Link to={`/users/${r.id}`}>{r.displayName}</Link>
             {r.id === me?.id && <Tag style={{ marginLeft: 6 }}>我</Tag>}
           </span>
           <span style={{ fontSize: 12, color: 'var(--echo-text-muted)' }}>{r.username}</span>
@@ -107,7 +110,7 @@ export default function Users() {
       render: (s: string) =>
         s === 'active' ? <Tag color="success">正常</Tag> : <Tag>已禁用</Tag>,
     },
-    { title: '最近活动', dataIndex: 'lastSeenAt', width: 120, render: fmtRelative },
+    { title: '最近联系', dataIndex: 'lastSeenAt', width: 120, render: fmtRelative },
     {
       title: '操作',
       width: 210,
@@ -136,20 +139,23 @@ export default function Users() {
 
   return (
     <>
-      <Alert showIcon type="info" message="这里管理组织成员与客户端权限；仅管理员可登录本后台。" style={{ marginBottom: 16 }} />
+      <p className="echo-help">成员通过桌面端使用知识与模型。点击成员姓名，集中管理权限、密钥、配额和设备。</p>
       <Space className="echo-toolbar" wrap>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
-          新建用户
+          新建成员
         </Button>
+        <Input.Search allowClear placeholder="搜索姓名或用户名" style={{width:240}} onSearch={setKeyword}/>
+        <Select allowClear placeholder="全部部门" style={{width:170}} value={department} onChange={setDepartment} options={groups.map(g=>({value:g.id,label:g.name}))}/>
+        <Select allowClear placeholder="全部状态" style={{width:130}} value={status} onChange={setStatus} options={[{value:'active',label:'启用'},{value:'disabled',label:'禁用'}]}/>
       </Space>
 
-      <Table scroll={{ x: 900 }} rowKey="id" loading={loading} columns={columns} dataSource={users} pagination={false} />
+      <Table scroll={{ x: 900 }} rowKey="id" loading={loading} columns={columns} dataSource={users.filter(u=>(!keyword||`${u.displayName} ${u.username}`.toLowerCase().includes(keyword.toLowerCase()))&&(!status||u.status===status)&&(!department||u.departmentId===department))} pagination={{pageSize:20,showTotal:n=>`共 ${n} 位成员`}} />
 
       <CreateModal
         open={createOpen}
         groups={groups}
         onClose={() => setCreateOpen(false)}
-        onDone={() => { setCreateOpen(false); void load() }}
+        onDone={(user) => { setCreateOpen(false); void load();if(user)nav(`/users/${user.id}?welcome=1`) }}
       />
       <EditModal
         user={editing}
@@ -168,7 +174,7 @@ function CreateModal({
   open: boolean
   groups: Group[]
   onClose: () => void
-  onDone: () => void
+  onDone: (user?:User) => void
 }): JSX.Element {
   const [form] = Form.useForm()
   const [busy, setBusy] = useState(false)
@@ -176,7 +182,7 @@ function CreateModal({
   return (
     <Modal
       open={open}
-      title="新建用户"
+      title="新建成员"
       onCancel={onClose}
       confirmLoading={busy}
       destroyOnClose
@@ -184,10 +190,10 @@ function CreateModal({
         const v = await form.validateFields()
         setBusy(true)
         try {
-          await api.createUser(v)
+          const created=await api.createUser(v)
           message.success('已创建')
           form.resetFields()
-          onDone()
+          onDone(created)
         } finally {
           setBusy(false)
         }
@@ -239,7 +245,7 @@ function CreateModal({
   )
 }
 
-function EditModal({
+export function EditModal({
   user, groups, isSelf, onClose, onDone,
 }: {
   user: User | null

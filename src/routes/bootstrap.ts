@@ -75,6 +75,7 @@ export function registerBootstrapRoutes(app: FastifyInstance): void {
 
     return reply.send(ok({
       apiVersion: 1,
+      clientReporting: { version: 1, heartbeatIntervalSeconds:60, endpoint:'/api/v1/client/heartbeat' },
       publication: { mode: 'automatic-safety', humanApprovalRequired: false },
       user: {
         id: user.id,

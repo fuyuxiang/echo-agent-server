@@ -22,7 +22,6 @@ export function registerGatewayAdminRoutes(app: FastifyInstance): void {
         if (!p.success)
             return reply.code(400).send(fail(4001, p.error.issues[0]?.message ?? '参数错误'));
         const v = p.data;
-        db.prepare('INSERT INTO model_config_history(id,config_json,gateway_json,actor_id,created_at) VALUES(?,?,?,?,?)').run(randomUUID(), JSON.stringify(db.prepare("SELECT * FROM model_configs WHERE id='default'").get() ?? null), JSON.stringify(settings(db)), (req as AuthedRequest).claims.sub, Date.now());
         if (v.publicBaseUrl) {
             try {
                 const u = new URL(v.publicBaseUrl);
@@ -33,6 +32,7 @@ export function registerGatewayAdminRoutes(app: FastifyInstance): void {
                 return reply.code(400).send(fail(4001, 'Base URL 必须为无凭证、查询参数和片段的 HTTP(S) 地址'));
             }
         }
+        db.prepare('INSERT INTO model_config_history(id,config_json,gateway_json,actor_id,created_at) VALUES(?,?,?,?,?)').run(randomUUID(), JSON.stringify(db.prepare("SELECT * FROM model_configs WHERE id='default'").get() ?? null), JSON.stringify(settings(db)), (req as AuthedRequest).claims.sub, Date.now());
         db.prepare(`UPDATE gateway_settings SET revision=revision+1,models_json=?,public_base_url=?,max_output_tokens=?,protocols=?,input_price=?,cached_price=?,output_price=?,currency=?,updated_at=? WHERE id='default'`).run(JSON.stringify(v.models), v.publicBaseUrl || null, v.maxOutputTokens, JSON.stringify(v.protocols), v.inputPrice, v.cachedPrice, v.outputPrice, v.currency, Date.now());
         app.audit(req, 'config_change', 'gateway', { ...v });
         return reply.send(ok({ updated: true }));
@@ -41,23 +41,28 @@ export function registerGatewayAdminRoutes(app: FastifyInstance): void {
         const m = resolveChatConfig(db, app.deps.cfg);
         if (!m.configured)
             return reply.code(409).send(fail(4091, '请先保存完整的模型配置'));
-        const started = Date.now();
+        const started = Date.now(),revision=settings(db).revision;
+        const save=(result:{success:boolean,httpStatus?:number,latencyMs:number,message:string})=>{
+            db.prepare('INSERT INTO model_connection_checks(id,revision,success,http_status,latency_ms,message,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),revision,result.success?1:0,result.httpStatus??null,result.latencyMs,result.message,Date.now());
+            return {...result,revision,checkedAt:Date.now(),stale:revision!==settings(db).revision};
+        };
         try {
             const res = await meteredFetch(`${m.baseUrl}/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${m.key}`, 'content-type': 'application/json' }, body: JSON.stringify({ model: m.model, max_tokens: 16, messages: [{ role: 'user', content: 'Reply OK' }] }), signal: AbortSignal.timeout(20000) }, { source: 'connection_test', model: m.model ?? 'unknown' });
             const body = await res.json().catch(() => null) as any;
-            const success = res.ok && Array.isArray(body?.choices);
+            const success = res.ok && Array.isArray(body?.choices) && body.choices.length>0 && body.choices.some((x:any)=>x.message&&typeof x.message==='object');
             app.audit(req, 'config_change', 'connection_test', { success, httpStatus: res.status });
-            return reply.send(ok({ success, httpStatus: res.status, latencyMs: Date.now() - started, message: success ? '上游实际调用成功' : '上游调用失败或返回格式不兼容' }));
+            return reply.send(ok(save({ success, httpStatus: res.status, latencyMs: Date.now() - started, message: success ? '上游实际调用成功' : res.status===429?'上游限流或账户额度不足，请检查供应商用量与套餐':res.status===401||res.status===403?'上游凭证无效或无模型权限，请检查密钥与模型授权':'上游调用失败或返回格式不兼容' })));
         }
         catch (e) {
-            return reply.send(ok({ success: false, latencyMs: Date.now() - started, message: e instanceof Error ? e.message : '连接失败' }));
+            return reply.send(ok(save({ success: false, latencyMs: Date.now() - started, message: '连接上游失败或超时，请检查网络和接口地址' })));
         }
     });
     app.get('/api/v1/api-keys', { preHandler: app.authenticate }, async (req, reply) => {
         const claims = (req as AuthedRequest).claims;
+        const userId=claims.role==='admin'?(req.query as {userId?:string}).userId:claims.sub;
         const rows = db.prepare(`SELECT k.id,k.user_id AS userId,u.display_name AS displayName,u.username,k.device_id AS deviceId,k.name,k.prefix,k.created_at AS createdAt,k.expires_at AS expiresAt,k.revoked_at AS revokedAt,k.last_used_at AS lastUsedAt,
     CASE WHEN k.revoked_at IS NOT NULL OR k.token_version!=u.token_version OR u.status!='active' THEN 'revoked' WHEN k.expires_at<=? THEN 'expired' ELSE 'active' END AS status
-    FROM api_keys k JOIN users u ON u.id=k.user_id ${claims.role === 'admin' ? '' : 'WHERE k.user_id=?'} ORDER BY k.created_at DESC LIMIT 2000`).all(Date.now(), ...(claims.role === 'admin' ? [] : [claims.sub]));
+    FROM api_keys k JOIN users u ON u.id=k.user_id ${userId ? 'WHERE k.user_id=?' : ''} ORDER BY k.created_at DESC LIMIT 2000`).all(Date.now(), ...(userId?[userId]:[]));
         reply.header('cache-control', 'no-store');
         return reply.send(ok({ items: rows, baseUrl: gatewayBaseUrl(db, `${req.protocol}://${req.host}`) }));
     });
@@ -90,7 +95,7 @@ export function registerGatewayAdminRoutes(app: FastifyInstance): void {
         app.audit(req, 'user_change', id, { apiKeyRevoked: true });
         return reply.send(ok({ revoked: true }));
     });
-    const querySchema = z.object({ from: z.coerce.number().int().min(0).optional(), to: z.coerce.number().int().min(0).optional(), userId: z.string().optional(), departmentId: z.string().optional(), source: z.string().max(80).optional(), state: z.enum(['pending', 'complete', 'partial', 'unknown']).optional(), model: z.string().max(200).optional(), page: z.coerce.number().int().min(1).default(1), size: z.coerce.number().int().min(1).max(100).default(25) });
+    const querySchema = z.object({ from: z.coerce.number().int().min(0).optional(), to: z.coerce.number().int().min(0).optional(), userId: z.string().optional(), departmentId: z.string().optional(), source: z.string().max(80).optional(), state: z.enum(['pending', 'complete', 'partial', 'unknown','unsettled']).optional(), model: z.string().max(200).optional(), page: z.coerce.number().int().min(1).default(1), size: z.coerce.number().int().min(1).max(100).default(25) });
     function filters(req: any): any {
         const q = querySchema.parse(req.query ?? {});
         const c = req.claims;
@@ -101,11 +106,13 @@ export function registerGatewayAdminRoutes(app: FastifyInstance): void {
         const clauses = ['c.started_at>=?', 'c.started_at<?'];
         const args: any[] = [from, to];
         const user = c.role === 'admin' ? q.userId : c.sub;
-        for (const [col, value] of [['user_id', user], ['department_id', q.departmentId], ['source', q.source], ['accounting_state', q.state], ['model', q.model]])
+        for (const [col, value] of [['user_id', user], ['department_id', q.departmentId], ['source', q.source], ['accounting_state', q.state], ['model', q.model]]) {
+            if(col==='accounting_state'&&value==='unsettled'){clauses.push("c.accounting_state IN ('unknown','partial')");continue;}
             if (value) {
                 clauses.push(`c.${col}=?`);
                 args.push(value);
             }
+        }
         return { q, where: clauses.join(' AND '), args, from, to };
     }
     app.get('/api/v1/usage', { preHandler: app.authenticate }, async (req, reply) => {
@@ -120,12 +127,14 @@ export function registerGatewayAdminRoutes(app: FastifyInstance): void {
         const { where, args, q } = f;
         const summary = db.prepare(`SELECT COUNT(*) AS calls,COALESCE(SUM(total_tokens),0) AS totalTokens,COALESCE(SUM(input_tokens),0) AS inputTokens,COALESCE(SUM(output_tokens),0) AS outputTokens,COALESCE(SUM(cached_tokens),0) AS cachedTokens,SUM(CASE WHEN accounting_state!='complete' THEN 1 ELSE 0 END) AS unsettled,SUM(CASE WHEN outcome IN ('failed','interrupted') THEN 1 ELSE 0 END) AS failed FROM model_calls c WHERE ${where}`).get(...args);
         const costs = db.prepare(`SELECT currency,SUM(estimated_cost) AS estimatedCost,COUNT(*) AS pricedCalls FROM model_calls c WHERE ${where} AND estimated_cost IS NOT NULL GROUP BY currency`).all(...args);
-        const rankings = db.prepare(`SELECT c.user_id AS userId,c.user_name AS username,u.display_name AS displayName,COUNT(*) AS calls,COALESCE(SUM(total_tokens),0) AS totalTokens,COALESCE(SUM(input_tokens),0) AS inputTokens,COALESCE(SUM(output_tokens),0) AS outputTokens,SUM(CASE WHEN accounting_state!='complete' THEN 1 ELSE 0 END) AS unsettled FROM model_calls c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} GROUP BY c.user_id,c.user_name ORDER BY totalTokens DESC,calls DESC LIMIT 100`).all(...args);
+        const rankings = db.prepare(`SELECT c.user_id AS userId,MAX(c.user_name) AS username,u.display_name AS displayName,COUNT(*) AS calls,COALESCE(SUM(total_tokens),0) AS totalTokens,COALESCE(SUM(input_tokens),0) AS inputTokens,COALESCE(SUM(output_tokens),0) AS outputTokens,SUM(CASE WHEN accounting_state!='complete' THEN 1 ELSE 0 END) AS unsettled FROM model_calls c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} GROUP BY c.user_id HAVING SUM(c.total_tokens)>0 ORDER BY totalTokens DESC,calls DESC LIMIT 100`).all(...args);
         const departments = db.prepare(`SELECT COALESCE(c.department_name,'未分配') AS name,COUNT(*) AS calls,COALESCE(SUM(total_tokens),0) AS totalTokens FROM model_calls c WHERE ${where} GROUP BY c.department_id,c.department_name ORDER BY totalTokens DESC`).all(...args);
         const sources = db.prepare(`SELECT source,model,COUNT(*) AS calls,COALESCE(SUM(total_tokens),0) AS totalTokens FROM model_calls c WHERE ${where} GROUP BY source,model ORDER BY totalTokens DESC`).all(...args);
-        const trend = db.prepare(`SELECT strftime('%Y-%m-%d',started_at/1000,'unixepoch','+8 hours') AS day,COUNT(*) AS calls,COALESCE(SUM(total_tokens),0) AS totalTokens FROM model_calls c WHERE ${where} GROUP BY day ORDER BY day`).all(...args);
+        const trend = db.prepare(`SELECT strftime('%Y-%m-%d',started_at/1000,'unixepoch','+8 hours') AS day,COUNT(*) AS calls,COALESCE(SUM(total_tokens IS NOT NULL),0) AS knownCalls,COALESCE(SUM(accounting_state IN ('unknown','partial')),0) AS unsettled,COALESCE(SUM(total_tokens),0) AS totalTokens FROM model_calls c WHERE ${where} GROUP BY day ORDER BY day`).all(...args);
         const items = db.prepare(`SELECT ${selectCall} FROM model_calls c LEFT JOIN users u ON u.id=c.user_id WHERE ${where} ORDER BY c.started_at DESC,c.id LIMIT ? OFFSET ?`).all(...args, q.size, (q.page - 1) * q.size);
-        return reply.send(ok({ summary, costs, rankings, departments, sources, trend, items, page: q.page, size: q.size, from: f.from, to: f.to, updatedAt: Date.now() }));
+        const coverage=db.prepare(`SELECT COUNT(*) AS total,COALESCE(SUM(accounting_state='complete'),0) AS complete,COALESCE(SUM(total_tokens IS NOT NULL),0) AS known FROM model_calls c WHERE ${where}`).get(...args);
+        const collectionStartedAt=Number((db.prepare("SELECT value FROM product_metadata WHERE key='usage_collection_started_at'").get() as any).value);
+        return reply.send(ok({ coverage,collectionStartedAt,summary, costs, rankings, departments, sources, trend, items, page: q.page, size: q.size, from: f.from, to: f.to, updatedAt: Date.now() }));
     });
     app.get('/api/v1/usage/export', { preHandler: app.authenticate }, async (req, reply) => {
         let f: any;

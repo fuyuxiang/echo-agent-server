@@ -2,7 +2,7 @@ import client from './client';
 export const getWorkspace = (): Promise<any> => client.get('/api/v1/admin/workspace');
 export const getUsage = (params: Record<string, unknown>): Promise<any> => client.get('/api/v1/usage', { params });
 export const exportUsage = (params: Record<string, unknown>): Promise<Blob> => client.get('/api/v1/usage/export', { params, responseType: 'blob' });
-export const getKeys = (): Promise<any> => client.get('/api/v1/api-keys');
+export const getKeys = (userId?:string): Promise<any> => client.get('/api/v1/api-keys',{params:{userId}});
 export const createKey = (body: unknown): Promise<any> => client.post('/api/v1/api-keys', body);
 export const revokeKey = (id: string): Promise<any> => client.post(`/api/v1/api-keys/${id}/revoke`);
 export const getQuotas = (): Promise<any[]> => client.get('/api/v1/quotas');

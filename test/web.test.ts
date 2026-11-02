@@ -26,23 +26,11 @@ function buildDist(root: string): string {
   return dist
 }
 
-/**
- * registerWeb 按 import.meta.url 推算 dist 位置,测试里无法搬动源码文件,
- * 所以这里复现它的注册逻辑来验证行为契约(SPA 回退 + API 404 不被吞)。
- */
 async function appWithStatic(root: string) {
-  const app = Fastify({ logger: false })
-  const staticPlugin = (await import('@fastify/static')).default
-  app.get('/api/v1/health', async () => ({ ok: true }))
-  await app.register(async (scope) => {
-    await scope.register(staticPlugin, { root, prefix: '/', wildcard: false })
-    scope.setNotFoundHandler((req, reply) => {
-      if (req.method !== 'GET' || req.url.startsWith('/api')) {
-        return reply.code(404).send({ code: 4040, msg: '接口不存在', data: null })
-      }
-      return reply.sendFile('index.html')
-    })
-  })
+  const app=Fastify({logger:false})
+  app.get('/api/v1/health',async()=>({ok:true}))
+  expect(registerWeb(app,undefined,root)).toBe(true)
+  await app.ready()
   return app
 }
 
@@ -104,4 +92,19 @@ describe('静态托管', () => {
     expect(res.statusCode).toBe(200)
     expect(res.json().ok).toBe(true)
   })
+  it('不存在的资源返回真实 404，避免被当成 JavaScript 执行 HTML', async()=>{
+    const app=await appWithStatic(buildDist(dir))
+    for(const url of ['/assets/old-version.js','/assets/missing.css']){
+      const response=await app.inject({url})
+      expect(response.statusCode).toBe(404)
+      expect(response.body).not.toContain('doctype')
+    }
+    await app.close()
+  })
+  it('入口 HTML 不缓存，升级后刷新会获取新入口', async()=>{
+    const app=await appWithStatic(buildDist(dir))
+    for(const url of ['/','/index.html','/users/123'])expect((await app.inject({url})).headers['cache-control']).toBe('no-store')
+    await app.close()
+  })
+
 })

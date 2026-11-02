@@ -12,7 +12,7 @@ describe('automatic safety checks',()=>{
   expect(await screen.findByText('危险技能')).toBeInTheDocument()
   expect(screen.queryByRole('button',{name:/审核通过|批准|退回/})).not.toBeInTheDocument()
   fireEvent.click(screen.getByRole('button',{name:/检查详情/}))
-  expect(await screen.findByText(/SKILL_DANGEROUS_COMMAND/)).toBeInTheDocument()
+  expect(await screen.findByText('破坏性命令')).toBeInTheDocument()
   vi.mocked(client.post).mockResolvedValue({state:'rejected',scanStatus:'failed',message:'危险命令仍被拦截'})
   fireEvent.click(screen.getByRole('button',{name:/重新执行安全检查/}))
   expect(await screen.findByText('危险命令仍被拦截')).toBeInTheDocument()
@@ -21,7 +21,7 @@ describe('automatic safety checks',()=>{
  it('uses the document filter in the embedded document checks view',async()=>{
   vi.mocked(client.get).mockResolvedValue({items:[],total:0,summary:{total:0,processing:0,failed:0,published:0}})
   render(<MemoryRouter><SecurityChecks defaultKind="document"/></MemoryRouter>)
-  expect(await screen.findByText('检查记录')).toBeInTheDocument()
-  expect(client.get).toHaveBeenCalledWith('/api/v1/admin/security-checks',{params:{kind:'document',status:undefined,page:1}})
+  expect(await screen.findByText('需要恢复 / 跟进')).toBeInTheDocument()
+  expect(client.get).toHaveBeenCalledWith('/api/v1/admin/security-checks',{params:{kind:'document',status:undefined,view:'all',page:1,assetId:undefined}})
  })
 })
