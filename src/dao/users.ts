@@ -10,6 +10,7 @@ export interface UserRow {
   role: 'admin' | 'curator' | 'member'
   status: 'active' | 'disabled'
   clearance: number
+  departmentId: string | null
   tokenVersion: number
   createdAt: number
   lastSeenAt: number | null
@@ -18,7 +19,7 @@ export interface UserRow {
 const SELECT = `
   id, username, display_name AS displayName, email, role, status,
   clearance, token_version AS tokenVersion, created_at AS createdAt,
-  last_seen_at AS lastSeenAt
+  department_id AS departmentId, last_seen_at AS lastSeenAt
 `
 
 export function findByUsername(db: DB, username: string): (UserRow & { passwordHash: string }) | undefined {
@@ -47,6 +48,7 @@ export interface CreateUserInput {
   email?: string
   role?: UserRow['role']
   clearance?: number
+  departmentId?: string | null
   groupIds?: string[]
 }
 
@@ -72,6 +74,7 @@ export async function createUser(db: DB, input: CreateUserInput): Promise<UserRo
     )
     // 每个服务端用户都有且只有一个个人云 Scope。物理 kind 仍为 team
     // （兼容 001 的 CHECK），v_effective_scopes 对外呈现 personal。
+    if(input.departmentId) db.prepare('UPDATE users SET department_id=? WHERE id=?').run(input.departmentId,id)
     const personalScopeId = `personal-${id}`
     db.prepare(
       "INSERT INTO scopes (id, kind, group_id, name) VALUES (?, 'team', NULL, ?)"
@@ -88,6 +91,7 @@ export async function createUser(db: DB, input: CreateUserInput): Promise<UserRo
 }
 
 export interface UpdateUserInput {
+  departmentId?: string | null
   displayName?: string
   email?: string | null
   role?: UserRow['role']
@@ -103,6 +107,7 @@ export function updateUser(db: DB, id: string, input: UpdateUserInput): UserRow 
   const sets: string[] = []
   const params: unknown[] = []
 
+  if (input.departmentId !== undefined) { sets.push('department_id = ?'); params.push(input.departmentId) }
   if (input.displayName !== undefined) { sets.push('display_name = ?'); params.push(input.displayName) }
   if (input.email !== undefined) { sets.push('email = ?'); params.push(input.email) }
   if (input.role !== undefined) { sets.push('role = ?'); params.push(input.role) }

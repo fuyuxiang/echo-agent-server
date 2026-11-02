@@ -11,7 +11,8 @@
     "build:assets": "node -e \"const fs=require('fs');const p=require('path');const src='src/db/migrations';const dst='dist/db/migrations';fs.mkdirSync(dst,{recursive:true});for(const f of fs.readdirSync(src)){fs.copyFileSync(p.join(src,f),p.join(dst,f));}\"",
     "start": "node dist/server.js",
     "eval": "tsx eval/run.ts",
-    "eval:ci": "bash eval/ci.sh"
+    "eval:ci": "bash eval/ci.sh",
+    "backup:restore": "node dist/operations/restore.js"
   },
   "keywords": [],
   "author": "",

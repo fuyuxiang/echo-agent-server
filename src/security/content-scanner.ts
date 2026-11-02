@@ -21,6 +21,12 @@ export interface ScanReport {
   scannedAt: number
 }
 
+/** Only transient scanner outages are retried; detected threats remain blocked. */
+export function scanNeedsRetry(report: ScanReport): boolean {
+  const blocked = report.findings.filter(f => f.severity === 'high' || f.severity === 'critical')
+  return report.status === 'failed' && blocked.length > 0 && blocked.every(f => f.code === 'ANTIVIRUS_UNAVAILABLE')
+}
+
 const EICAR = 'X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
 const BLOCKING = new Set<FindingSeverity>(['high', 'critical'])
 const TEXT_TYPES = new Set(['md', 'txt', 'qa', 'meeting'])
@@ -100,7 +106,7 @@ async function inspectOffice(
   for (const entry of names.filter((name) => name.endsWith('.rels'))) {
     const text = await zip.file(entry)?.async('string')
     if (text && /TargetMode\s*=\s*["']External["']/i.test(text)) {
-      findings.push(finding('OFFICE_EXTERNAL_LINK', 'warning', '文件包含外部链接，审核时需确认', entry))
+      findings.push(finding('OFFICE_EXTERNAL_LINK', 'warning', '文件包含外部链接', entry))
     }
   }
 }
@@ -200,6 +206,7 @@ async function commonReport(
   if (data.toString('latin1').includes(EICAR)) {
     findings.push(finding('EICAR_TEST_SIGNATURE', 'critical', '检测到 EICAR 防病毒测试签名'))
   }
+  const staticBlocked = findings.some(item => BLOCKING.has(item.severity))
   const antivirus = await clamScan(data, cfg)
   if (antivirus.status === 'infected') {
     findings.push(finding('ANTIVIRUS_DETECTED', 'critical', antivirus.detail ?? '防病毒引擎检测到威胁'))
@@ -215,7 +222,7 @@ async function commonReport(
     status: findings.some((item) => BLOCKING.has(item.severity)) ? 'failed' : 'passed',
     kind,
     detectedMime: mime,
-    engines: [{ name: 'echo-static', status: 'clean' }, { name: 'clamav', ...antivirus }],
+    engines: [{ name: 'echo-static', status: staticBlocked ? 'infected' : 'clean', ...(staticBlocked ? {detail:'命中静态风险规则'} : {}) }, { name: 'clamav', ...antivirus }],
     findings,
     scannedAt: Date.now()
   }
@@ -247,7 +254,7 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\bsk-[A-Za-z0-9_-]{20,}\b/, 'API Key']
 ]
 const DANGEROUS_COMMANDS: Array<[RegExp, string]> = [
-  [/\brm\s+-rf\s+(?:\/|~|\$HOME)(?:\s|$)/i, '破坏性删除命令'],
+  [/\brm\s+-rf\s+(?:\/|~|\$HOME)(?:\s|[\"'`]|$)/i, '破坏性删除命令'],
   [/(?:curl|wget)[^\n|]{0,300}\|\s*(?:sh|bash|zsh)\b/i, '远程下载后直接执行'],
   [/\bnc\s+[^\n]{0,100}-e\b|\/dev\/tcp\/|powershell[^\n]{0,100}-enc(?:odedcommand)?\b/i, '反向 Shell/编码执行']
 ]
@@ -264,9 +271,13 @@ export async function scanSkillPackage(data: Buffer, cfg: Config): Promise<ScanR
   }
   for (const entry of Object.values(zip.files).filter((item) => !item.dir)) {
     const bytes = Buffer.from(await entry.async('uint8array'))
-    if (bytes.length > 2 * 1024 * 1024) continue
+    if (bytes.toString('latin1').includes(EICAR)) findings.push(finding('EICAR_TEST_SIGNATURE', 'critical', '检测到 EICAR 防病毒测试签名', entry.name))
+    if (/\.pdf$/i.test(entry.name)) inspectPdf(bytes, findings)
+    if (bytes.length > 20 * 1024 * 1024) {
+      findings.push(finding('SKILL_FILE_TOO_LARGE', 'critical', '文件超过安全检查大小上限', entry.name)); continue
+    }
     if (bytes.includes(0)) {
-      if (!/\.(?:png|jpe?g|gif|webp|pdf)$/i.test(entry.name)) {
+      if (!(/\.(?:png|jpe?g|gif|webp)$/i.test(entry.name) && detectedMime(bytes, 'image')) && !(/\.pdf$/i.test(entry.name) && detectedMime(bytes, 'pdf'))) {
         findings.push(finding('SKILL_BINARY_CONTENT', 'high', '未声明的二进制内容', entry.name))
       }
       continue
@@ -279,13 +290,13 @@ export async function scanSkillPackage(data: Buffer, cfg: Config): Promise<ScanR
       if (pattern.test(text)) findings.push(finding('SKILL_DANGEROUS_COMMAND', 'critical', label, entry.name))
     }
     if (/\b(?:https?|wss?):\/\//i.test(text)) {
-      findings.push(finding('SKILL_NETWORK_ADDRESS', 'warning', '包含外部网络地址，需人工确认', entry.name))
+      findings.push(finding('SKILL_NETWORK_ADDRESS', 'warning', '包含网络地址，执行时仍受客户端网络权限控制', entry.name))
     }
     if (/(?:\/etc\/(?:passwd|shadow)|~\/\.ssh|\.aws\/credentials|Keychain|Credential Manager)/i.test(text)) {
       findings.push(finding('SKILL_SENSITIVE_PATH', 'high', '尝试访问敏感系统路径', entry.name))
     }
     if (/\.(?:sh|bash|zsh|ps1|bat|cmd|py|js|ts)$/i.test(entry.name)) {
-      findings.push(finding('SKILL_SCRIPT', 'warning', '包含可执行脚本，需人工审核', entry.name))
+      findings.push(finding('SKILL_SCRIPT', 'warning', '包含脚本，执行时仍受客户端权限控制', entry.name))
     }
   }
   return commonReport('skill', data, 'application/zip', findings, cfg)

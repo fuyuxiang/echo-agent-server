@@ -1,3 +1,4 @@
+import { usageContext } from '../../gateway/usage.js'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { DB } from '../../db/index.js'
@@ -39,6 +40,8 @@ export function enqueueIngest(db: DB, docId: string): string {
       `INSERT INTO ingest_jobs (id, doc_id, stage, state, attempts, created_at, updated_at)
        VALUES (?,?,'parse','queued',0,?,?)`
     ).run(id, docId, now, now)
+    const actor=usageContext.getStore()?.userId
+    if(actor)db.prepare('UPDATE ingest_jobs SET requested_by=? WHERE id=?').run(actor,id)
     db.prepare(
       `UPDATE documents
           SET status = 'pending', fail_reason = NULL,
@@ -155,6 +158,8 @@ export async function tick(deps: WorkerDeps): Promise<boolean> {
   const job = claimNext(db)
   if (!job) return false
 
+  const owner = db.prepare('SELECT COALESCE(j.requested_by,d.owner_id) AS id FROM ingest_jobs j JOIN documents d ON d.id=j.doc_id WHERE j.id=?').get(job.id) as {id:string}|undefined
+  return usageContext.run({db,cfg:current(deps.cfg),userId:owner?.id,taskId:job.id,assetId:job.docId,source:'document_ingest'}, async () => {
   try {
     const doc = db
       .prepare(
@@ -268,6 +273,7 @@ export async function tick(deps: WorkerDeps): Promise<boolean> {
     }
     return true
   }
+  })
 }
 
 /** 排空队列。测试与"上传后立即处理"用。 */

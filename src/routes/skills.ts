@@ -4,10 +4,10 @@ import JSZip from 'jszip'
 import { parseDocument } from 'yaml'
 import { z } from 'zod'
 import { type AuthedRequest, requireCurator } from '../auth/jwt.js'
-import { canAccessScope, loadAccessContext } from '../auth/scopes.js'
+import { loadManagementContext, canAccessScope, loadAccessContext } from '../auth/scopes.js'
 import { fail, ok } from '../reply.js'
 import { signServerPayload } from '../server-signing.js'
-import { scanSkillPackage, type ScanReport } from '../security/content-scanner.js'
+import { scanSkillPackage, scanNeedsRetry, type ScanReport } from '../security/content-scanner.js'
 
 const MAX_SKILL_PACKAGE_BYTES = 10 * 1024 * 1024
 const MAX_SKILL_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
@@ -87,7 +87,7 @@ function isSymbolicLink(entry: JSZip.JSZipObject): boolean {
   return typeof mode === 'number' && (mode & 0o170000) === 0o120000
 }
 
-async function inspectSkillPackage(buf: Buffer, requestedVersion?: string): Promise<PackageManifest> {
+export async function inspectSkillPackage(buf: Buffer, requestedVersion?: string): Promise<PackageManifest> {
   if (buf.length > MAX_SKILL_PACKAGE_BYTES) throw new Error('技能包超过 10MB 上限')
   let zip: JSZip
   try {
@@ -140,7 +140,7 @@ async function inspectSkillPackage(buf: Buffer, requestedVersion?: string): Prom
   return { name, description, version, files: entries.map((entry) => entry.name).sort() }
 }
 
-function signaturePayload(input: {
+export function signaturePayload(input: {
   familyId: string
   versionId: string
   version: string
@@ -171,9 +171,8 @@ function scanFailure(report: ScanReport): string {
 }
 
 function canManageVersion(app: FastifyInstance, userId: string, role: string, row: VersionRow): boolean {
-  if (role === 'admin') return true
-  const ctx = loadAccessContext(app.deps.db, userId)
-  return role === 'curator' && canAccessScope(ctx, row.scopeId)
+  const ctx = loadManagementContext(app.deps.db, userId,role)
+  return ['admin','curator'].includes(role) && canAccessScope(ctx,row.scopeId)
 }
 
 function versionById(app: FastifyInstance, versionId: string): VersionRow | undefined {
@@ -237,11 +236,12 @@ export function registerSkillRoutes(app: FastifyInstance): void {
 
     const now = Date.now()
     let family = db.prepare(
-      'SELECT id, owner_id AS ownerId FROM skill_families WHERE scope_id = ? AND slug = ?'
-    ).get(scopeId, manifest.name) as { id: string; ownerId: string | null } | undefined
+      'SELECT id, owner_id AS ownerId,mandatory,allow_personal_override AS allowPersonalOverride,state FROM skill_families WHERE scope_id = ? AND slug = ?'
+    ).get(scopeId, manifest.name) as { id: string; ownerId: string | null; mandatory?:number;allowPersonalOverride?:number;state?:string } | undefined
     if (family && family.ownerId !== claims.sub && claims.role === 'member') {
       return reply.code(409).send(fail(4094, '同名 Skill 已由其他人管理'))
     }
+    if (family?.state && family.state !== 'active' && claims.role === 'member') return reply.code(403).send(fail(4036, '技能已停用，请联系管理员'))
     const familyId = family?.id ?? randomUUID()
     const versionId = randomUUID()
     const hash = createHash('sha256').update(buf).digest('hex')
@@ -257,7 +257,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
     const scanStartedAt = Date.now()
     const scanReport = await scanSkillPackage(buf, cfg)
     const scanPassed = scanReport.status === 'passed'
-    const autoApprove = scanPassed && (scope.kind === 'personal' || claims.role !== 'member')
+    const autoApprove = scanPassed
     const packageKey = autoApprove
       ? await storage.move(quarantineKey, 'published/skills')
       : quarantineKey
@@ -269,11 +269,11 @@ export function registerSkillRoutes(app: FastifyInstance): void {
         version: manifest.version,
         hash,
         scopeKind: scope.kind,
-        mandatory: false,
-        allowPersonalOverride: true
+        mandatory: !!family?.mandatory,
+        allowPersonalOverride: family?.allowPersonalOverride !== 0
       })
     )
-    const finalState = !scanPassed ? 'rejected' : autoApprove ? 'approved' : 'pending'
+    const finalState = !scanPassed ? (scanNeedsRetry(scanReport) ? 'pending' : 'rejected') : 'approved'
     db.transaction(() => {
       if (!family) {
         db.prepare(
@@ -283,7 +283,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
            VALUES (?,?,?,?,?,?,'active',0,1,?,?)`
         ).run(familyId, scopeId, manifest.name, manifest.name, manifest.description, claims.sub, now, now)
         family = { id: familyId, ownerId: claims.sub }
-      } else {
+      } else if (scanPassed) {
         db.prepare(
           `UPDATE skill_families SET name=?, description=?, state='active', updated_at=? WHERE id=?`
         ).run(manifest.name, manifest.description, now, familyId)
@@ -307,7 +307,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
         signature,
         finalState,
         claims.sub,
-        autoApprove ? claims.sub : null,
+        null,
         now,
         autoApprove || !scanPassed ? now : null,
         autoApprove ? now : null,
@@ -318,7 +318,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
         fields.changelog?.value?.trim().slice(0, 4000) || null,
         scanStartedAt,
         Date.now(),
-        scanPassed ? null : scanFailure(scanReport)
+        scanPassed ? '安全检查通过后自动发布' : scanFailure(scanReport)
       )
       if (autoApprove) {
         db.prepare(
@@ -326,6 +326,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
         ).run(versionId, now, familyId)
       }
     })()
+    if (scanNeedsRetry(scanReport)) db.prepare('UPDATE skill_versions SET auto_retry_at=? WHERE id=?').run(Date.now()+60000,versionId)
     app.audit(req, !scanPassed ? 'skill_scan_failed' : autoApprove ? 'skill_publish' : 'skill_submit', versionId, {
       familyId,
       scopeId,
@@ -372,7 +373,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
     preHandler: [app.authenticate, requireCurator]
   }, async (req, reply) => {
     const claims = (req as AuthedRequest).claims
-    const ctx = loadAccessContext(db, claims.sub)
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
     const state = String((req.query as { state?: string }).state ?? 'pending')
     if (!['pending', 'approved', 'rejected', 'revoked'].includes(state)) {
       return reply.code(400).send(fail(4001, '非法的 state'))
@@ -420,51 +421,15 @@ export function registerSkillRoutes(app: FastifyInstance): void {
     const versionId = (req.params as { id: string }).id
     const row = versionById(app, versionId)
     if (!row) return reply.code(404).send(fail(4041, '提交不存在'))
-    if (row.state !== 'pending') return reply.code(409).send(fail(4093, `该提交已处理(${row.state})`))
-    if (row.scanStatus !== 'passed') {
-      return reply.code(409).send(fail(4096, `技术扫描未通过(${row.scanStatus ?? 'unknown'})`))
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
+    if (!canAccessScope(ctx, row.scopeId)) return reply.code(403).send(fail(4034, '无权处理此范围的技能'))
+    const { processPublication } = await import('../operations/automatic-publication.js')
+    const result = row.state === 'approved' ? { state: 'approved', resultId: row.familyId, scanStatus: 'passed' } : await processPublication(app, 'skill', versionId)
+    if (result.state === 'approved' && (parsed.data.mandatory !== undefined || parsed.data.allowPersonalOverride !== undefined)) {
+      const policy = await app.inject({method:'PATCH',url:`/api/v1/admin/skills/${row.familyId}/policy`,headers:{authorization:req.headers.authorization!},payload:{mandatory:parsed.data.mandatory,allowPersonalOverride:parsed.data.allowPersonalOverride,note:parsed.data.note ?? '更新技能分发策略'}})
+      if (policy.statusCode !== 200) return reply.code(policy.statusCode).send(policy.json())
     }
-    if (!canManageVersion(app, claims.sub, claims.role, row)) {
-      return reply.code(403).send(fail(4034, '无权审核该范围的 Skill'))
-    }
-    const now = Date.now()
-    const mandatory = parsed.data.mandatory ?? !!row.mandatory
-    const allowPersonalOverride = parsed.data.allowPersonalOverride ?? !!row.allowPersonalOverride
-    const publishedKey = row.publishedPackageKey ?? await storage.move(
-      row.quarantinePackageKey ?? row.packageKey,
-      'published/skills'
-    )
-    const signature = signServerPayload(cfg.masterKey, signaturePayload({
-      familyId: row.familyId,
-      versionId,
-      version: row.version,
-      hash: row.contentHash,
-      scopeKind: row.scopeKind,
-      mandatory,
-      allowPersonalOverride
-    }))
-    db.transaction(() => {
-      db.prepare(
-        `UPDATE skill_versions SET state='approved', reviewer_id=?, review_note=?,
-                reviewed_at=?, published_at=?, package_key=?, published_package_key=?,
-                quarantine_package_key=NULL, signature=?
-          WHERE id=? AND state='pending'`
-      ).run(claims.sub, parsed.data.note ?? null, now, now, publishedKey, publishedKey, signature, versionId)
-      db.prepare(
-        `UPDATE skill_families SET current_version_id=?, state='active',
-                mandatory=COALESCE(?, mandatory),
-                allow_personal_override=COALESCE(?, allow_personal_override), updated_at=?
-          WHERE id=?`
-      ).run(
-        versionId,
-        Number(mandatory),
-        Number(allowPersonalOverride),
-        now,
-        row.familyId
-      )
-    })()
-    app.audit(req, 'skill_approve', versionId, { familyId: row.familyId })
-    return reply.send(ok({ state: 'approved', skillId: row.familyId, versionId }))
+    return reply.send(ok({ ...result, skillId: row.familyId, versionId }))
   })
 
   app.get('/api/v1/admin/skill-submissions/:id/package', {
@@ -576,26 +541,28 @@ export function registerSkillRoutes(app: FastifyInstance): void {
     }
     const version = parsed.data.version ?? source.version
     let family = db.prepare(
-      `SELECT id,owner_id AS ownerId FROM skill_families WHERE scope_id=? AND slug=?`
-    ).get(target.id, source.slug) as { id: string; ownerId: string | null } | undefined
+      `SELECT id,owner_id AS ownerId,mandatory,allow_personal_override AS allowPersonalOverride,state FROM skill_families WHERE scope_id=? AND slug=?`
+    ).get(target.id, source.slug) as { id: string; ownerId: string | null; mandatory?:number;allowPersonalOverride?:number;state?:string } | undefined
     if (family && family.ownerId !== claims.sub && claims.role === 'member') {
       return reply.code(409).send(fail(4094, '目标空间的同名 Skill 由其他人管理'))
     }
+    if (family?.state && family.state !== 'active' && claims.role === 'member') return reply.code(403).send(fail(4036, '技能已停用，请联系管理员'))
     const familyId = family?.id ?? randomUUID()
     if (db.prepare('SELECT 1 FROM skill_versions WHERE family_id=? AND version=?').get(familyId, version)) {
       return reply.code(409).send(fail(4095, `版本 ${version} 已存在`))
     }
     const bytes = await storage.get(source.packageKey)
+    if (createHash('sha256').update(bytes).digest('hex') !== source.hash) return reply.code(409).send(fail(4096, '源技能包校验失败，请重新上传'))
     const report = await scanSkillPackage(bytes, cfg)
     const quarantineKey = await storage.put(bytes, 'zip', 'quarantine/skills')
     const now = Date.now()
     const versionId = randomUUID()
-    const autoApprove = report.status === 'passed' && claims.role !== 'member'
+    const autoApprove = report.status === 'passed'
     const packageKey = autoApprove
       ? await storage.move(quarantineKey, 'published/skills') : quarantineKey
     const signature = signServerPayload(cfg.masterKey, signaturePayload({
       familyId, versionId, version, hash: source.hash, scopeKind: target.kind,
-      mandatory: false, allowPersonalOverride: true
+      mandatory: !!family?.mandatory, allowPersonalOverride: family?.allowPersonalOverride !== 0
     }))
     db.transaction(() => {
       if (!family) {
@@ -617,9 +584,9 @@ export function registerSkillRoutes(app: FastifyInstance): void {
       ).run(
         versionId, familyId, version, packageKey, source.hash, source.packageBytes,
         source.manifestJson, signature,
-        report.status === 'failed' ? 'rejected' : autoApprove ? 'approved' : 'pending',
-        claims.sub, autoApprove ? claims.sub : null,
-        report.status === 'failed' ? scanFailure(report) : null, now,
+        report.status === 'failed' ? (scanNeedsRetry(report) ? 'pending' : 'rejected') : 'approved',
+        claims.sub, null,
+        report.status === 'failed' ? scanFailure(report) : '安全检查通过后自动发布', now,
         autoApprove || report.status === 'failed' ? now : null,
         autoApprove ? now : null, autoApprove ? null : quarantineKey,
         autoApprove ? packageKey : null, report.status, JSON.stringify(report),
@@ -630,6 +597,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
           .run(versionId, now, familyId)
       }
     })()
+    if (scanNeedsRetry(report)) db.prepare('UPDATE skill_versions SET auto_retry_at=? WHERE id=?').run(Date.now()+60000,versionId)
     app.audit(req, report.status === 'failed' ? 'skill_scan_failed' :
       autoApprove ? 'skill_publish' : 'skill_submit', versionId, {
       sourceSkillId: sourceId, familyId, scopeId: target.id, version
@@ -843,8 +811,8 @@ export function registerSkillRoutes(app: FastifyInstance): void {
       versionId: string | null
     } | undefined
     if (!row) return reply.code(404).send(fail(4041, 'Skill 不存在'))
-    const ctx = loadAccessContext(db, claims.sub)
-    const allowed = claims.role === 'admin' ||
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
+    const allowed = (claims.role === 'admin' && canAccessScope(ctx,row.scopeId)) ||
       (claims.role === 'curator' && canAccessScope(ctx, row.scopeId)) ||
       (row.scopeKind === 'personal' && row.ownerId === claims.sub)
     if (!allowed) return reply.code(403).send(fail(4034, '无权撤回该 Skill'))
@@ -870,8 +838,8 @@ export function registerSkillRoutes(app: FastifyInstance): void {
       `SELECT scope_id AS scopeId, current_version_id AS versionId, state
          FROM skill_families WHERE id=?`
     ).get(skillId) as { scopeId: string; versionId: string | null; state: string } | undefined
-    const ctx = loadAccessContext(db, claims.sub)
-    if (!row || (claims.role !== 'admin' && !canAccessScope(ctx, row.scopeId))) {
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
+    if (!row || (!canAccessScope(ctx, row.scopeId))) {
       return reply.code(404).send(fail(4041, 'Skill 不存在或无权管理'))
     }
     if (row.state === 'revoked') return reply.send(ok({ state: 'disabled', dedup: true }))
@@ -911,8 +879,8 @@ export function registerSkillRoutes(app: FastifyInstance): void {
       allowPersonalOverride: number
       scopeKind: string
     } | undefined
-    const ctx = loadAccessContext(db, claims.sub)
-    if (!family || (claims.role !== 'admin' && !canAccessScope(ctx, family.scopeId))) {
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
+    if (!family || (!canAccessScope(ctx, family.scopeId))) {
       return reply.code(404).send(fail(4041, 'Skill 不存在或无权管理'))
     }
     const target = parsed.data.versionId
@@ -954,4 +922,16 @@ export function registerSkillRoutes(app: FastifyInstance): void {
     })
     return reply.send(ok({ state: 'active', skillId, versionId: version.id, version: version.version }))
   })
+  app.patch('/api/v1/admin/skills/:id/policy',{preHandler:[app.authenticate,requireCurator]},async(req,reply)=>{
+    const p=z.object({mandatory:z.boolean(),allowPersonalOverride:z.boolean(),note:z.string().trim().min(1).max(2000)}).safeParse(req.body)
+    if(!p.success)return reply.code(400).send(fail(4001,'请填写分发策略和变更原因'))
+    const c=(req as AuthedRequest).claims,{id}=req.params as {id:string},ctx=loadManagementContext(db,c.sub,c.role)
+    const row=db.prepare(`SELECT f.scope_id AS scopeId,f.mandatory,f.current_version_id AS versionId,s.kind AS scopeKind,v.version,v.content_hash AS hash FROM skill_families f JOIN v_effective_scopes s ON s.id=f.scope_id LEFT JOIN skill_versions v ON v.id=f.current_version_id WHERE f.id=?`).get(id) as any
+    if(!row||!ctx.scopeIds.includes(row.scopeId))return reply.code(404).send(fail(4041,'技能不存在'))
+    if(c.role!=='admin'&&p.data.mandatory!==!!row.mandatory)return reply.code(403).send(fail(4031,'只有管理员可以修改必装策略'))
+    const signature=row.versionId?signServerPayload(cfg.masterKey,signaturePayload({familyId:id,versionId:row.versionId,version:row.version,hash:row.hash,scopeKind:row.scopeKind,mandatory:p.data.mandatory,allowPersonalOverride:p.data.allowPersonalOverride})):null
+    db.transaction(()=>{db.prepare('UPDATE skill_families SET mandatory=?,allow_personal_override=?,updated_at=? WHERE id=?').run(Number(p.data.mandatory),Number(p.data.allowPersonalOverride),Date.now(),id);if(signature)db.prepare('UPDATE skill_versions SET signature=? WHERE id=?').run(signature,row.versionId)})()
+    app.audit(req,'config_change',id,{skillPolicy:p.data});return reply.send(ok({updated:true}))
+  })
+
 }

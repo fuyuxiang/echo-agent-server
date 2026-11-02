@@ -1,3 +1,7 @@
+import * as ops from '../api/operations'
+import { message, Button, Modal, Tabs } from 'antd'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Maintenance } from './Operations'
 import { useEffect, useState, useCallback } from 'react'
 import {
   Card, Row, Col, Statistic, Table, Segmented, Space, Empty, Alert, Tag, Spin,
@@ -14,6 +18,16 @@ import { fmtPercent, fmtTime } from '../utils/format'
  * 摄取出了问题,或者出现了新的知识盲区。
  */
 export default function Quality() {
+  const [params, setParams] = useSearchParams()
+  return <Tabs activeKey={params.get('tab') === 'maintenance' ? 'maintenance' : 'analysis'} onChange={key => setParams(key === 'maintenance' ? { tab: key } : {})} items={[
+    { key: 'analysis', label: '质量分析', children: <QualityAnalysis /> },
+    { key: 'maintenance', label: '维护任务', children: <Maintenance /> },
+  ]} />
+}
+
+function QualityAnalysis() {
+  const nav=useNavigate()
+  const createTask=(question:string)=>Modal.confirm({title:'创建知识维护任务？',content:question,onOk:async()=>{await ops.createMaintenance({question});message.success('已创建维护任务');nav('/quality?tab=maintenance')}})
   const [days, setDays] = useState(30)
   const [data, setData] = useState<QualityOverview | null>(null)
   const [loading, setLoading] = useState(false)
@@ -56,41 +70,42 @@ export default function Quality() {
         />
       )}
 
-      <Row gutter={16}>
-        <Col span={6}>
+      <Alert showIcon type="info" message={`已收到 ${data.feedbackCount??0} 次反馈，覆盖 ${(100*(data.feedbackCoverage??0)).toFixed(1)}% 的问答；负面反馈率按已有反馈计算，未反馈不会计为满意。`}/>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} sm={12} xl={6}>
           <Card>
             <Statistic title="问答总数" value={data.total} />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={24} sm={12} xl={6}>
           <Card>
             <Statistic
               title="无答案率"
               value={fmtPercent(data.unansweredRate)}
-              valueStyle={unansweredHigh ? { color: '#cf1322' } : undefined}
+              valueStyle={unansweredHigh ? { color: 'var(--echo-error)' } : undefined}
             />
-            <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
+            <div style={{ fontSize: 12, color: 'var(--echo-text-muted)', marginTop: 4 }}>
               {unansweredHigh ? '偏高,检查摄取或补充文档' : '正常'}
             </div>
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={24} sm={12} xl={6}>
           <Card>
             <Statistic
               title="负面反馈率"
               value={fmtPercent(data.negativeRate)}
-              valueStyle={data.negativeRate > 0.15 ? { color: '#cf1322' } : undefined}
+              valueStyle={data.negativeRate > 0.15 ? { color: 'var(--echo-error)' } : undefined}
             />
           </Card>
         </Col>
-        <Col span={6}>
+        <Col xs={24} sm={12} xl={6}>
           <Card>
             <Statistic
               title="深度检索占比"
               value={fmtPercent(data.agenticRate)}
-              valueStyle={agenticHigh ? { color: '#d46b08' } : undefined}
+              valueStyle={agenticHigh ? { color: 'var(--echo-warning)' } : undefined}
             />
-            <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
+            <div style={{ fontSize: 12, color: 'var(--echo-text-muted)', marginTop: 4 }}>
               {agenticHigh ? '超过 25%,客户端判定可能过松' : '正常'}
             </div>
           </Card>
@@ -98,7 +113,7 @@ export default function Quality() {
       </Row>
 
       <Card size="small" title="检索延迟">
-        <Row gutter={16}>
+        <Row gutter={[16, 16]}>
           <Col span={8}><Statistic title="平均" value={data.latency.avg ?? '—'} suffix="ms" /></Col>
           <Col span={8}><Statistic title="p50" value={data.latency.p50 ?? '—'} suffix="ms" /></Col>
           <Col span={8}>
@@ -106,11 +121,11 @@ export default function Quality() {
               title="p95"
               value={data.latency.p95 ?? '—'}
               suffix="ms"
-              valueStyle={(data.latency.p95 ?? 0) > 800 ? { color: '#cf1322' } : undefined}
+              valueStyle={(data.latency.p95 ?? 0) > 800 ? { color: 'var(--echo-error)' } : undefined}
             />
           </Col>
         </Row>
-        <div style={{ fontSize: 12, color: '#999', marginTop: 8 }}>
+        <div style={{ fontSize: 12, color: 'var(--echo-text-muted)', marginTop: 8 }}>
           p95 目标 ≤ 800ms。超标先看精排是否被跳过(服务端日志会记录降级原因)。
         </div>
       </Card>
@@ -118,9 +133,10 @@ export default function Quality() {
       <Card
         size="small"
         title="知识盲区"
-        extra={<span style={{ fontSize: 12, color: '#999' }}>没答上来的问题,可直接作为补充文档的清单</span>}
+        extra={<span style={{ fontSize: 12, color: 'var(--echo-text-muted)' }}>没答上来的问题,可直接作为补充文档的清单</span>}
       >
         <Table
+          scroll={{ x: 400 }}
           rowKey="question"
           size="small"
           pagination={false}
@@ -128,16 +144,18 @@ export default function Quality() {
           locale={{ emptyText: '暂无' }}
           columns={[
             { title: '问题', dataIndex: 'question' },
+            {title:'',width:100,render:(_:unknown,r:{question:string})=><Button type="link" onClick={()=>createTask(r.question)}>创建任务</Button>},
             { title: '被问次数', dataIndex: 'n', width: 100 },
           ]}
         />
       </Card>
 
-      <Row gutter={16}>
-        <Col span={12}>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} xl={12}>
           <Card size="small" title="被标记为无用或错误的回答">
-            <Table
-              rowKey={(r) => `${r.question}-${r.createdAt}`}
+            <Table<QualityOverview['negativeTop'][number]>
+              scroll={{ x: 440 }}
+              rowKey={(r:QualityOverview['negativeTop'][number]) => `${r.question}-${r.createdAt}`}
               size="small"
               pagination={false}
               dataSource={data.negativeTop}
@@ -154,18 +172,20 @@ export default function Quality() {
                     </Tag>
                   ),
                 },
+                {title:'',width:100,render:(_:unknown,r:{question:string})=><Button type="link" onClick={()=>createTask(r.question)}>创建任务</Button>},
                 { title: '时间', dataIndex: 'createdAt', width: 140, render: fmtTime },
               ]}
             />
           </Card>
         </Col>
-        <Col span={12}>
+        <Col xs={24} xl={12}>
           <Card
             size="small"
-            title="从未被引用的文档"
-            extra={<span style={{ fontSize: 12, color: '#999' }}>候选归档对象</span>}
+            title="当前版本从未被引用（全量历史）"
+            extra={<span style={{ fontSize: 12, color: 'var(--echo-text-muted)' }}>候选归档对象</span>}
           >
             <Table
+              scroll={{ x: 440 }}
               rowKey="id"
               size="small"
               pagination={false}
@@ -180,6 +200,7 @@ export default function Quality() {
         </Col>
       </Row>
 
+      <Card title="知识贡献与复用" extra={<span className="echo-muted">同一回答引用同一逻辑文档仅计一次</span>}><Table scroll={{x:600}} rowKey="id" dataSource={data.contributions??[]} pagination={{pageSize:10}} columns={[{title:'维护人',dataIndex:'displayName'},{title:'当前在库文档',dataIndex:'documents'},{title:'有效经验',dataIndex:'memories'},{title:'已发布技能',dataIndex:'skills'},{title:`近 ${days} 天引用`,dataIndex:'citations'}]}/><p className="echo-muted">贡献量按当前共享知识统计，引用量按所选时间窗口统计；个人知识不参与组织贡献排名。</p></Card>
       <Card size="small" title="文档摄取状态分布">
         <Space wrap>
           {data.docStats.map((s) => (

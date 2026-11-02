@@ -1,14 +1,16 @@
+import DocumentDetail from '../components/DocumentDetail'
+import client from '../api/client'
 import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   Table, Button, Upload, Modal, Form, Select, Input, Tag, Space, Progress,
-  Tooltip, Popconfirm, message, Alert, Tabs,
+  Tooltip, Popconfirm, message, Alert, Tabs, Dropdown,
 } from 'antd'
-import { UploadOutlined, ReloadOutlined, DeleteOutlined, InboxOutlined, EyeOutlined, DownloadOutlined } from '@ant-design/icons'
+import { MoreOutlined, UploadOutlined, InboxOutlined, DownloadOutlined } from '@ant-design/icons'
 import type { UploadFile } from 'antd/es/upload/interface'
 import * as api from '../api'
 import type { DocumentItem, DocStatus, Scope } from '../types'
 import { fmtBytes, fmtTime } from '../utils/format'
-import { DocumentSubmissionReview } from './Review'
+import SecurityChecks from './SecurityChecks'
 
 const STATUS_META: Record<DocStatus, { color: string; label: string }> = {
   pending: { color: 'default', label: '排队中' },
@@ -23,6 +25,10 @@ const STATUS_META: Record<DocStatus, { color: string; label: string }> = {
 const IN_PROGRESS: DocStatus[] = ['pending', 'parsing', 'chunking', 'embedding']
 
 export default function Documents() {
+  const [detail,setDetail]=useState<DocumentItem|null>(null)
+  const [statusFilter,setStatusFilter]=useState<string>()
+  const [selected,setSelected]=useState<React.Key[]>([])
+  const sequence=useRef(0)
   const [items, setItems] = useState<DocumentItem[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -38,6 +44,7 @@ export default function Documents() {
   const timer = useRef<number | null>(null)
 
   const load = useCallback(async () => {
+    const request=++sequence.current
     setLoading(true)
     try {
       const res = await api.listDocs({
@@ -47,16 +54,19 @@ export default function Documents() {
         q: keyword || undefined,
         tag: tagFilter || undefined,
         view: 'manage',
+        status: statusFilter,
       })
-      setItems(res.items)
-      setTotal(res.total)
+      if(request===sequence.current){setItems(res.items);setTotal(res.total)}
+    } catch {
+      // Shared client presents the error. Filters and selection stay available for retry.
     } finally {
-      setLoading(false)
+      if(request===sequence.current)setLoading(false)
     }
-  }, [page, scopeFilter, keyword, tagFilter])
+  }, [page, scopeFilter, keyword, tagFilter,statusFilter])
 
+  useEffect(()=>{setSelected([])},[page,scopeFilter,keyword,tagFilter,statusFilter])
   useEffect(() => { void load() }, [load])
-  useEffect(() => { void api.listScopes().then(setScopes) }, [])
+  useEffect(() => { void api.listScopes().then(items => setScopes(items.filter(s => s.kind !== 'personal'))) }, [])
 
   // 摄取是异步的,不轮询的话管理员会以为卡住了。只在确实有进行中的文档时轮询,
   // 空闲页面不该一直打服务端。
@@ -111,8 +121,8 @@ export default function Documents() {
       dataIndex: 'title',
       render: (t: string, r: DocumentItem) => (
         <Space direction="vertical" size={4}>
-          <span>{t}</span>
-          <span style={{ fontSize: 12, color: '#999' }}>
+          <Button type="link" style={{padding:0,height:'auto',whiteSpace:'normal',textAlign:'left'}} onClick={()=>setDetail(r)}>{t}</Button>
+          <span style={{ fontSize: 12, color: 'var(--echo-text-muted)' }}>
             {r.sourceType} · {fmtBytes(r.byteSize)} · {r.chunkCount} 个片段
           </span>
           {r.tags.length > 0 && (
@@ -143,13 +153,6 @@ export default function Documents() {
       ),
     },
     {
-      title: '密级',
-      dataIndex: 'sensitivity',
-      width: 80,
-      render: (s: number) =>
-        s === 0 ? <Tag>公开</Tag> : s === 1 ? <Tag color="orange">内部</Tag> : <Tag color="red">机密</Tag>,
-    },
-    {
       title: '状态',
       dataIndex: 'status',
       width: 150,
@@ -176,42 +179,18 @@ export default function Documents() {
         return <Tag color={meta.color}>{meta.label}</Tag>
       },
     },
-    { title: '维护人', dataIndex: 'ownerName', width: 100, render: (n: string | null) => n ?? '—' },
     { title: '更新时间', dataIndex: 'updatedAt', width: 160, render: fmtTime },
     {
       title: '操作',
-      width: 250,
-      render: (_: unknown, r: DocumentItem) => (
+      width: 110,
+      fixed: 'right' as const,
+      render: (_:unknown,r:DocumentItem)=>(
         <Space size={4}>
-          {r.status === 'ready' && <>
-            <Button size="small" type="link" icon={<EyeOutlined />} loading={previewLoading} onClick={() => void openPreview(r)}>查看</Button>
-            <Button size="small" type="link" icon={<DownloadOutlined />} onClick={() => void download(r)}>下载</Button>
-          </>}
-          <Tooltip title="重新解析并索引。改了分块策略或换嵌入模型后需要执行">
-            <Button
-              size="small"
-              type="link"
-              icon={<ReloadOutlined />}
-              onClick={async () => {
-                await api.reindexDoc(r.id)
-                message.success('已加入重建队列')
-                void load()
-              }}
-            >
-              重建
-            </Button>
-          </Tooltip>
-          <Popconfirm
-            title="确认下线该文档?"
-            description="内容将立即从检索中移除,文档记录保留以便追溯"
-            onConfirm={async () => {
-              await api.deleteDoc(r.id)
-              message.success('已下线')
-              void load()
-            }}
-          >
-            <Button size="small" type="link" danger icon={<DeleteOutlined />}>下线</Button>
-          </Popconfirm>
+          <Button size="small" type="link" onClick={()=>setDetail(r)}>详情</Button>
+          <Dropdown trigger={['click']} menu={{items:[
+            {key:'reindex',label:'重新处理文档',onClick:()=>{void api.reindexDoc(r.id).then(()=>{message.success('已加入处理队列');void load()}).catch(()=>{})}},
+            {key:'archive',label:'下线文档',danger:true,onClick:()=>Modal.confirm({title:'确认下线该文档？',content:'立即从检索中移除，保留记录与历史版本。',okButtonProps:{danger:true},onOk:async()=>{await api.deleteDoc(r.id);message.success('已下线');void load()}})},
+          ]}}><Button size="small" type="text" aria-label={`更多操作 ${r.title}`} icon={<MoreOutlined/>}/></Dropdown>
         </Space>
       ),
     },
@@ -221,10 +200,10 @@ export default function Documents() {
     <>
       <Tabs activeKey={section} onChange={setSection} items={[
         { key: 'library', label: '在库文档' },
-        { key: 'history', label: '历史提交' },
+        { key: 'history', label: '安全检查记录' },
       ]} />
-      {section === 'history' ? <DocumentSubmissionReview /> : <>
-      <Space style={{ marginBottom: 16 }} wrap>
+      {section === 'history' ? <SecurityChecks defaultKind="document" /> : <>
+      <Space className="echo-toolbar" wrap>
         <Button type="primary" icon={<UploadOutlined />} onClick={() => setUploadOpen(true)}>
           上传文档
         </Button>
@@ -234,7 +213,7 @@ export default function Documents() {
           style={{ width: 180 }}
           value={scopeFilter}
           onChange={(v) => { setScopeFilter(v); setPage(1) }}
-          options={scopes.map((s) => ({
+          options={scopes.filter(s=>(s as Scope & {canPublishDocuments?:boolean}).canPublishDocuments!==false).map((s) => ({
             value: s.id,
             label: s.kind === 'org' ? '全公司' : s.name,
           }))}
@@ -245,6 +224,8 @@ export default function Documents() {
           style={{ width: 220 }}
           onSearch={(v) => { setKeyword(v); setPage(1) }}
         />
+        <Select allowClear placeholder="全部状态" style={{width:140}} value={statusFilter} onChange={v=>{setStatusFilter(v);setPage(1);setSelected([])}} options={Object.entries(STATUS_META).map(([value,m])=>({value,label:m.label}))}/>
+        <Button onClick={()=>void load()}>刷新</Button>
         {tagFilter && (
           <Tag closable onClose={() => { setTagFilter(''); setPage(1) }}>
             标签：{tagFilter}
@@ -252,10 +233,13 @@ export default function Documents() {
         )}
       </Space>
 
+      {selected.length>0&&<Space style={{marginBottom:16}}><span>已选 {selected.length} 份</span><Button onClick={async()=>{const results=await Promise.allSettled(selected.map(id=>api.reindexDoc(String(id))));const failed=results.filter(x=>x.status==='rejected').length;Modal.info({title:'批量操作结果',content:`成功 ${results.length-failed} 份，失败 ${failed} 份。失败项请单独查看原因后重试。`});setSelected([]);void load()}}>批量重建</Button><Popconfirm title="批量下线所选文档？" onConfirm={async()=>{const results=await Promise.allSettled(selected.map(id=>api.deleteDoc(String(id))));const failed=results.filter(x=>x.status==='rejected').length;Modal.info({title:'批量操作结果',content:`成功 ${results.length-failed} 份，失败 ${failed} 份`});setSelected([]);void load()}}><Button danger>批量下线</Button></Popconfirm></Space>}
       <Table
+        scroll={{ x: 820 }}
         rowKey="id"
         loading={loading}
         columns={columns}
+        rowSelection={{selectedRowKeys:selected,onChange:setSelected,preserveSelectedRowKeys:false}}
         dataSource={items}
         pagination={{
           current: page,
@@ -273,6 +257,7 @@ export default function Documents() {
         onDone={() => { setUploadOpen(false); void load() }}
       />
       </>}
+      <DocumentDetail doc={detail} onClose={()=>setDetail(null)} onChanged={()=>{void load()}} onPreview={doc=>{void openPreview(doc)}}/>
       <Modal open={!!preview} title={preview?.title} onCancel={() => setPreview(null)} footer={
         <Space>
           {preview?.hasMore && <Button loading={previewLoading} onClick={() => void morePreview()}>加载后续内容</Button>}
@@ -298,21 +283,22 @@ function UploadModal({
   onDone: () => void
 }) {
   const [form] = Form.useForm()
+  const [caps,setCaps]=useState<any>(null)
+  useEffect(()=>{if(open)void client.get('/api/v1/docs/capabilities').then(setCaps).catch(()=>{})},[open])
+  const [outcomes,setOutcomes]=useState<{name:string;state:string}[]>([])
   const [fileList, setFileList] = useState<UploadFile[]>([])
   const [busy, setBusy] = useState(false)
 
   const submit = async (): Promise<void> => {
     const values = await form.validateFields()
-    const file = fileList[0]?.originFileObj
-    if (!file) { message.error('请选择文件'); return }
+    const files=fileList.map(x=>x.originFileObj).filter(Boolean) as File[]
+    if(!files.length){message.error('请选择文件');return}
     setBusy(true)
+    const results:{name:string;state:string}[]=[]
     try {
-      const res = await api.uploadDoc(file, values)
-      // 去重不是失败,但要让管理员知道为什么没有新记录出现。
-      message.success(res.dedup ? '该文件已存在,已复用现有文档' : '上传成功,正在后台索引')
-      form.resetFields()
-      setFileList([])
-      onDone()
+      for(const file of files){try{const res=await api.uploadDoc(file,values);results.push({name:file.name,state:res.dedup?'已存在':'已上传'})}catch{results.push({name:file.name,state:'失败，请重试'})}setOutcomes([...results])}
+      if(results.every(x=>!x.state.startsWith('失败'))){message.success(`已上传 ${results.length} 份文档`);form.resetFields();setFileList([]);setOutcomes([]);onDone()}
+      else setFileList(fileList.filter(x=>results.find(r=>r.name===x.name)?.state.startsWith('失败')))
     } finally {
       setBusy(false)
     }
@@ -332,14 +318,14 @@ function UploadModal({
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="当前支持 md / txt / docx / pdf"
-        description="扫描件 PDF 若无文本层会被判为失败并提示需要 OCR,不会静默产出空索引。"
+        message={caps?`可上传：${caps.types.filter((t:any)=>t.available).map((t:any)=>t.extension).join(' / ')}`:'正在读取服务器能力'}
+        description={caps?`单文件上限 ${fmtBytes(caps.maxUploadBytes)}；可批量选择。不可用类型：${caps.types.filter((t:any)=>!t.available).map((t:any)=>`${t.extension}（${t.reason}）`).join('；')||'无'}`:undefined}
       />
       <Form form={form} layout="vertical" initialValues={{ sensitivity: 0, volatility: 'stable' }}>
         <Form.Item name="scopeId" label="可见范围" rules={[{ required: true, message: '请选择可见范围' }]}>
           <Select
             placeholder="谁能检索到这份文档"
-            options={scopes.map((s) => ({
+            options={scopes.filter(s=>(s as Scope & {canPublishDocuments?:boolean}).canPublishDocuments!==false).map((s) => ({
               value: s.id,
               label: s.kind === 'org' ? '全公司' : `${s.name}(团队）`,
             }))}
@@ -373,15 +359,17 @@ function UploadModal({
           <Input placeholder="如:财务,报销" />
         </Form.Item>
         <Upload.Dragger
-          maxCount={1}
+          multiple
+          maxCount={30}
           fileList={fileList}
-          beforeUpload={() => false}
-          onChange={({ fileList: fl }) => setFileList(fl.slice(-1))}
-          accept=".md,.markdown,.txt,.text,.docx,.pdf"
+          beforeUpload={file=>{if(caps&&file.size>caps.maxUploadBytes){message.error(`${file.name} 超过上限`);return Upload.LIST_IGNORE}return false}}
+          onChange={({fileList:fl})=>setFileList(fl)}
+          accept={caps?.types.filter((t:any)=>t.available).map((t:any)=>t.extension.startsWith('.')?t.extension:'.'+t.extension).join(',')}
         >
           <p className="ant-upload-drag-icon"><InboxOutlined /></p>
           <p className="ant-upload-text">点击或拖拽文件到此处</p>
         </Upload.Dragger>
+        {outcomes.map(x=><p key={x.name}>{x.name}：{x.state}</p>)}
       </Form>
     </Modal>
   )

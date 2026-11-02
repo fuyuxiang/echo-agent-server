@@ -10,12 +10,9 @@ import type {
   DocumentItem,
   IngestStatus,
   OrgMemory,
-  Promotion,
   ModelConfig,
   QualityOverview,
   AuditLog,
-  DocumentSubmission,
-  SkillSubmission,
   EnterprisePolicy,
 } from '../types'
 
@@ -24,11 +21,11 @@ import type {
 
 // ── 认证 ──────────────────────────────────────────────────────────────────
 export const login = (username: string, password: string): Promise<AuthState> =>
-  client.post('/api/v1/auth/login', { username, password, deviceId: 'admin-web' })
+  client.post('/api/v1/admin/auth/login', { username, password })
 
-export const logout = (): Promise<unknown> => client.post('/api/v1/auth/logout')
+export const logout = (): Promise<unknown> => client.post('/api/v1/admin/auth/logout')
 
-export const me = (): Promise<SessionUser> => client.get('/api/v1/me')
+export const me = (): Promise<SessionUser> => client.get('/api/v1/admin/auth/me')
 
 // ── 用户与分组 ────────────────────────────────────────────────────────────
 export const listUsers = (): Promise<User[]> => client.get('/api/v1/admin/users')
@@ -40,6 +37,7 @@ export const createUser = (body: {
   email?: string
   role?: Role
   clearance?: number
+  departmentId?: string | null
   groupIds?: string[]
 }): Promise<User> => client.post('/api/v1/admin/users', body)
 
@@ -51,7 +49,8 @@ export const updateUser = (
     role?: Role
     status?: 'active' | 'disabled'
     clearance?: number
-    groupIds?: string[]
+    departmentId?: string | null
+  groupIds?: string[]
   },
 ): Promise<User> => client.patch(`/api/v1/admin/users/${id}`, body)
 
@@ -128,6 +127,7 @@ export const uploadDoc = (
 export const patchDoc = (
   id: string,
   body: {
+    ifUnmodifiedSince?:number
     title?: string
     scopeId?: string
     sensitivity?: number
@@ -141,46 +141,6 @@ export const reindexDoc = (id: string): Promise<unknown> =>
   client.post(`/api/v1/docs/${id}/reindex`)
 
 export const deleteDoc = (id: string): Promise<unknown> => client.delete(`/api/v1/docs/${id}`)
-
-// ── 审核 ──────────────────────────────────────────────────────────────────
-export const listPromotions = (state = 'pending'): Promise<Promotion[]> =>
-  client.get('/api/v1/promotions', { params: { state } })
-
-/** edits 让审核人在通过前顺手修订,避免提交人反复返工。 */
-export const approvePromotion = (
-  id: string,
-  body: { note?: string; edits?: Record<string, unknown> },
-): Promise<{ state: string; resultId: string }> =>
-  client.post(`/api/v1/promotions/${id}/approve`, body)
-
-export const rejectPromotion = (id: string, note: string): Promise<unknown> =>
-  client.post(`/api/v1/promotions/${id}/reject`, { note })
-
-export const listDocumentSubmissions = (state = 'pending'): Promise<DocumentSubmission[]> =>
-  client.get('/api/v1/document-submissions', { params: { state } })
-
-export const approveDocumentSubmission = (id: string, note?: string): Promise<unknown> =>
-  client.post(`/api/v1/document-submissions/${id}/approve`, { note })
-
-export const rejectDocumentSubmission = (id: string, note: string): Promise<unknown> =>
-  client.post(`/api/v1/document-submissions/${id}/reject`, { note })
-
-export const downloadDocumentSubmission = (id: string): Promise<Blob> =>
-  client.get(`/api/v1/document-submissions/${id}/raw`, { responseType: 'blob' })
-
-export const listSkillSubmissions = (state = 'pending'): Promise<SkillSubmission[]> =>
-  client.get('/api/v1/admin/skill-submissions', { params: { state } })
-
-export const approveSkillSubmission = (
-  id: string,
-  body: { note?: string; mandatory?: boolean; allowPersonalOverride?: boolean },
-): Promise<unknown> => client.post(`/api/v1/admin/skill-submissions/${id}/approve`, body)
-
-export const rejectSkillSubmission = (id: string, note: string): Promise<unknown> =>
-  client.post(`/api/v1/admin/skill-submissions/${id}/reject`, { note })
-
-export const downloadSkillSubmission = (id: string): Promise<Blob> =>
-  client.get(`/api/v1/admin/skill-submissions/${id}/package`, { responseType: 'blob' })
 
 export const disableSkill = (id: string, note: string): Promise<unknown> =>
   client.post(`/api/v1/admin/skills/${id}/disable`, { note })

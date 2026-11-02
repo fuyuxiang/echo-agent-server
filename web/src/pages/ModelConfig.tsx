@@ -1,3 +1,4 @@
+import GatewaySettings from '../components/GatewaySettings'
 import { useEffect, useState } from 'react'
 import { Card, Form, Input, Select, Button, message, Alert, Tag, Space, InputNumber } from 'antd'
 import * as api from '../api'
@@ -31,15 +32,15 @@ export default function ModelConfig() {
     })
   }
 
-  useEffect(() => { void load() }, [])
+  useEffect(() => { void load().catch(()=>{}) }, [])
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Alert
         type="warning"
         showIcon
-        message="登录客户端会同步对话模型凭证"
-        description="组织成员在桌面端登录成功后，当前对话模型的 Base URL、模型名和 API Key 会写入其本地模型配置。更换密钥后，客户端需重新登录或重新启动以获取新配置。"
+        message="客户端通过服务器网关访问模型"
+        description="组织成员登录后自动获取服务器 Base URL 和绑定自己的访问密钥。上游真实密钥只保存在服务器，用户与内部知识调用统一统计。"
       />
 
       <Alert
@@ -70,11 +71,12 @@ export default function ModelConfig() {
         />
       )}
 
+      <GatewaySettings />
       <Card
-        title="模型配置"
+        title="上游模型配置"
         extra={
           cfg?.updatedAt ? (
-            <span style={{ fontSize: 12, color: '#999' }}>更新于 {fmtTime(cfg.updatedAt)}</span>
+            <span style={{ fontSize: 12, color: 'var(--echo-text-muted)' }}>更新于 {fmtTime(cfg.updatedAt)}</span>
           ) : null
         }
       >
@@ -90,6 +92,8 @@ export default function ModelConfig() {
               await load()
               // 保存成功后清空 Key 输入框,避免它留在 DOM 里。
               form.setFieldValue('chatKey', undefined)
+            } catch {
+              // API errors are presented by the shared client.
             } finally {
               setBusy(false)
             }
@@ -103,7 +107,7 @@ export default function ModelConfig() {
           </Form.Item>
           <Form.Item
             name="chatBaseUrl"
-            label="接口基地址"
+            label="上游接口基地址"
             extra="须兼容 OpenAI chat/completions；OpenAI 官方接口可留空"
           >
             <Input placeholder="https://..." />

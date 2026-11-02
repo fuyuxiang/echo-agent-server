@@ -2,14 +2,14 @@ import { createHash, randomUUID } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { type AuthedRequest, requireCurator } from '../auth/jwt.js'
-import { canAccessScope, canPublishDocument, loadAccessContext } from '../auth/scopes.js'
+import { loadManagementContext, canAccessScope, canPublishDocument, loadAccessContext } from '../auth/scopes.js'
 import { deleteChunks } from '../kb/ingest/indexer.js'
 import { archiveFamilyIfCurrent } from '../dao/documents.js'
 import { createDocumentFamily } from '../dao/documents.js'
 import { sourceTypeFromName, SUPPORTED_EXTENSIONS } from '../kb/ingest/parse.js'
 import { enqueueIngest } from '../kb/ingest/worker.js'
 import { fail, ok } from '../reply.js'
-import { scanDocument, type ScanReport } from '../security/content-scanner.js'
+import { scanDocument, scanNeedsRetry, type ScanReport } from '../security/content-scanner.js'
 import { sourceCapabilityError } from '../kb/ingest/capabilities.js'
 
 const ReviewSchema = z.object({ note: z.string().max(2000).optional() })
@@ -21,7 +21,7 @@ const PublishCopySchema = z.object({
   tags: z.array(z.string()).max(50).optional()
 })
 
-interface SubmissionRow {
+export interface SubmissionRow {
   id: string
   submitterId: string
   targetScope: string
@@ -61,7 +61,7 @@ function readTags(value: string | undefined): string[] {
   return [...new Set((value ?? '').split(',').map((v) => v.trim()).filter(Boolean))].slice(0, 50)
 }
 
-function createDocumentFromSubmission(
+export function createDocumentFromSubmission(
   app: FastifyInstance,
   row: SubmissionRow,
   now = Date.now()
@@ -100,7 +100,8 @@ function createDocumentFromSubmission(
       db.prepare('INSERT OR IGNORE INTO doc_tags (doc_id, tag) VALUES (?,?)').run(docId, tag)
     }
   })()
-  enqueueIngest(db, docId)
+  const jobId = enqueueIngest(db, docId)
+  db.prepare('UPDATE ingest_jobs SET requested_by=? WHERE id=?').run(row.submitterId, jobId)
   return docId
 }
 
@@ -111,7 +112,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
     const parsed = PublishCopySchema.safeParse(req.body ?? {})
     if (!parsed.success) return reply.code(400).send(fail(4001, '参数错误'))
     const claims = (req as AuthedRequest).claims
-    const ctx = loadAccessContext(db, claims.sub)
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
     const sourceId = (req.params as { id: string }).id
     const source = db.prepare(
       `SELECT d.id, d.title, d.source_type AS sourceType, d.storage_key AS storageKey,
@@ -170,7 +171,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       sensitivity: parsed.data.sensitivity ?? source.sensitivity,
       volatility: parsed.data.volatility ?? source.volatility,
       tagsJson: JSON.stringify(tags),
-      state: report.status === 'passed' ? (autoApprove ? 'approved' : 'pending') : 'rejected',
+      state: report.status === 'passed' ? 'approved' : scanNeedsRetry(report) ? 'pending' : 'rejected',
       scanStatus: report.status,
       scanReportJson: JSON.stringify(report),
       quarantineStorageKey: quarantineKey,
@@ -195,12 +196,13 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       submissionId, claims.sub, target.id, submission.title, source.sourceType,
       submission.storageKey, source.contentHash, bytes.length, submission.sensitivity,
       submission.volatility, submission.tagsJson, submission.state,
-      autoApprove && report.status === 'passed' ? claims.sub : null,
-      report.status === 'failed' ? scanMessage(report) : null, docId, now,
+      null,
+      report.status === 'failed' ? scanMessage(report) : '安全检查通过后自动发布', docId, now,
       autoApprove || report.status === 'failed' ? now : null, sourceId,
       submission.quarantineStorageKey ?? null, submission.publishedStorageKey ?? null,
       report.status, JSON.stringify(report), now, now
     )
+    if (scanNeedsRetry(report)) db.prepare('UPDATE document_submissions SET auto_retry_at=? WHERE id=?').run(Date.now()+60000,submissionId)
     app.audit(req, report.status === 'failed' ? 'document_scan_failed' :
       autoApprove ? 'upload' : 'document_submit', submissionId, {
       sourceDocumentId: sourceId, targetScope: target.id, docId
@@ -218,7 +220,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
    * 统一文件入口：
    * - 自己的 personal scope：直接创建文档并摄取；
    * - curator/admin：对可管理的组织空间直接发布；
-   * - member -> team/org：仅创建 pending submission，不进入检索。
+   * - 成员显式提交到可见的团队/组织空间，安全检查通过后自动发布。
    */
   app.post(
     '/api/v1/document-submissions',
@@ -231,7 +233,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       if (!targetScope) return reply.code(400).send(fail(4001, '缺少 scopeId'))
 
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
       if (!canPublishDocument(db, ctx, claims.role, targetScope)) {
         return reply.code(403).send(fail(4033, '没有目标范围的文档发布权限'))
       }
@@ -361,10 +363,10 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       if (report.status === 'failed') {
         db.prepare(
           `UPDATE document_submissions
-              SET state='rejected', scan_status='failed', scan_report_json=?,
+              SET state=?, scan_status='failed', scan_report_json=?,auto_retry_at=?,
                   review_note=?, reviewed_at=?, scan_completed_at=?
             WHERE id=?`
-        ).run(JSON.stringify(report), scanMessage(report), completedAt, completedAt, id)
+        ).run(scanNeedsRetry(report)?'pending':'rejected',JSON.stringify(report),scanNeedsRetry(report)?Date.now()+60000:null,scanMessage(report),completedAt,completedAt,id)
         app.audit(req, 'document_scan_failed', id, {
           targetScope,
           findingCodes: report.findings.map((item) => item.code)
@@ -390,7 +392,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
               SET state='approved', storage_key=?, quarantine_storage_key=NULL,
                   published_storage_key=?, reviewer_id=?, reviewed_at=?, result_document_id=?
             WHERE id=?`
-        ).run(publishedKey, publishedKey, claims.sub, completedAt, docId, id)
+        ).run(publishedKey, publishedKey, null, completedAt, docId, id)
       }
 
       app.audit(req, 'upload', id, {
@@ -477,7 +479,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
 
   app.get('/api/v1/document-submissions/:id', { preHandler: app.authenticate }, async (req, reply) => {
     const claims = (req as AuthedRequest).claims
-    const ctx = loadAccessContext(db, claims.sub)
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
     const id = (req.params as { id: string }).id
     const row = db.prepare(
       `SELECT ds.id, ds.submitter_id AS submitterId, ds.title,
@@ -492,8 +494,8 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
          JOIN v_effective_scopes s ON s.id=ds.target_scope
         WHERE ds.id=?`
     ).get(id) as Record<string, unknown> | undefined
-    if (!row || (row.submitterId !== claims.sub && claims.role !== 'admin' &&
-      !(claims.role === 'curator' && canAccessScope(ctx, String(row.targetScope))))) {
+    if (!row || Number(row.sensitivity)>ctx.clearance || (row.submitterId !== claims.sub &&
+      !(['admin','curator'].includes(claims.role) && canAccessScope(ctx, String(row.targetScope))))) {
       return reply.code(404).send(fail(4041, '提交不存在或无权查看'))
     }
     return reply.send(ok({
@@ -510,14 +512,14 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
     { preHandler: [app.authenticate, requireCurator] },
     async (req, reply) => {
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
       const requestedState = String((req.query as { state?: string }).state ?? 'pending')
       if (!['pending', 'approved', 'rejected', 'withdrawn'].includes(requestedState)) {
         return reply.code(400).send(fail(4001, '非法的 state'))
       }
-      const where = ['ds.state = ?']
-      const params: unknown[] = [requestedState]
-      if (claims.role !== 'admin') {
+      const where = ['ds.state = ?', 'ds.sensitivity <= ?']
+      const params: unknown[] = [requestedState,ctx.clearance]
+      {
         if (ctx.scopeIds.length === 0) return reply.send(ok([]))
         where.push(`ds.target_scope IN (${ctx.scopeIds.map(() => '?').join(',')})`)
         params.push(...ctx.scopeIds)
@@ -550,12 +552,12 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
     { preHandler: app.authenticate },
     async (req, reply) => {
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
       const id = (req.params as { id: string }).id
       const row = db.prepare(
         `SELECT target_scope AS targetScope, submitter_id AS submitterId,
                 hidden_by_submitter AS hiddenBySubmitter,
-                scan_status AS scanStatus, title, source_type AS sourceType,
+                scan_status AS scanStatus, sensitivity, title, source_type AS sourceType,
                 storage_key AS storageKey
            FROM document_submissions WHERE id = ?`
       ).get(id) as {
@@ -563,14 +565,15 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
         submitterId: string
         hiddenBySubmitter: number
         scanStatus: string
+        sensitivity: number
         title: string
         sourceType: string
         storageKey: string
       } | undefined
       const isOwner = row?.submitterId === claims.sub && row.scanStatus === 'passed' && !row.hiddenBySubmitter
-      const isReviewer = claims.role === 'admin' ||
+      const isReviewer = (claims.role === 'admin' && !!row && canAccessScope(ctx,row.targetScope)) ||
         (claims.role === 'curator' && !!row && canAccessScope(ctx, row.targetScope))
-      if (!row || (!isOwner && !isReviewer)) {
+      if (!row || row.sensitivity>ctx.clearance || (!isOwner && !isReviewer)) {
         return reply.code(404).send(fail(4041, '提交不存在或无权访问'))
       }
       const buf = await storage.get(row.storageKey)
@@ -590,7 +593,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       const parsed = ReviewSchema.safeParse(req.body ?? {})
       if (!parsed.success) return reply.code(400).send(fail(4001, '参数错误'))
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
       const id = (req.params as { id: string }).id
       const row = db.prepare(
         `SELECT id, submitter_id AS submitterId, target_scope AS targetScope, title,
@@ -604,45 +607,12 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
            FROM document_submissions WHERE id = ?`
       ).get(id) as SubmissionRow | undefined
       if (!row) return reply.code(404).send(fail(4041, '提交不存在'))
+      if ('sensitivity' in row && Number(row.sensitivity)>ctx.clearance)return reply.code(403).send(fail(4031,'密级权限不足'))
       if (row.state !== 'pending') return reply.code(409).send(fail(4093, `该提交已处理(${row.state})`))
-      if (row.scanStatus !== 'passed') {
-        return reply.code(409).send(fail(4096, `技术扫描未通过(${row.scanStatus ?? 'unknown'})`))
-      }
-      if (claims.role !== 'admin' && !canAccessScope(ctx, row.targetScope)) {
-        return reply.code(403).send(fail(4034, '无权审核该范围的提交'))
-      }
-
-      const existing = db.prepare(
-        `SELECT id, status FROM documents
-          WHERE scope_id = ? AND content_hash = ? AND status != 'archived'
-          ORDER BY created_at DESC LIMIT 1`
-      ).get(row.targetScope, row.contentHash) as { id: string; status: string } | undefined
-      if (!existing) {
-        const capabilityError = await sourceCapabilityError(row.sourceType, app.deps, row.byteSize)
-        if (capabilityError) return reply.code(503).send(fail(5033, capabilityError))
-      }
-      const now = Date.now()
-      if (!row.publishedStorageKey) {
-        const sourceKey = row.quarantineStorageKey ?? row.storageKey
-        row.publishedStorageKey = await storage.move(sourceKey, 'published/documents')
-        row.quarantineStorageKey = null
-        row.storageKey = row.publishedStorageKey
-        db.prepare(
-          `UPDATE document_submissions
-              SET storage_key=?, published_storage_key=?, quarantine_storage_key=NULL
-            WHERE id=?`
-        ).run(row.storageKey, row.storageKey, id)
-      } else {
-        row.storageKey = row.publishedStorageKey
-      }
-      const docId = existing?.id ?? createDocumentFromSubmission(app, row, now)
-      db.prepare(
-        `UPDATE document_submissions
-            SET state='approved', reviewer_id=?, review_note=?, result_document_id=?, reviewed_at=?
-          WHERE id=? AND state='pending'`
-      ).run(claims.sub, parsed.data.note ?? null, docId, now, id)
-      app.audit(req, 'approve', id, { kind: 'document', docId, dedup: !!existing })
-      return reply.send(ok({ state: 'approved', docId, documentStatus: existing?.status ?? 'pending' }))
+      if (!canAccessScope(ctx, row.targetScope) || row.sensitivity > ctx.clearance) return reply.code(403).send(fail(4034, '无权处理该范围的提交'))
+      const { processPublication } = await import('../operations/automatic-publication.js')
+      const result = await processPublication(app, 'document', id)
+      return reply.code(result.busy ? 409 : 200).send(ok({ ...result, docId: result.resultId }))
     }
   )
 
@@ -653,14 +623,15 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       const parsed = z.object({ note: z.string().min(1).max(2000) }).safeParse(req.body ?? {})
       if (!parsed.success) return reply.code(400).send(fail(4001, '请说明驳回原因'))
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
       const id = (req.params as { id: string }).id
       const row = db.prepare(
         'SELECT target_scope AS targetScope, state FROM document_submissions WHERE id = ?'
       ).get(id) as { targetScope: string; state: string } | undefined
       if (!row) return reply.code(404).send(fail(4041, '提交不存在'))
+      if ('sensitivity' in row && Number(row.sensitivity)>ctx.clearance)return reply.code(403).send(fail(4031,'密级权限不足'))
       if (row.state !== 'pending') return reply.code(409).send(fail(4093, `该提交已处理(${row.state})`))
-      if (claims.role !== 'admin' && !canAccessScope(ctx, row.targetScope)) {
+      if (!canAccessScope(ctx, row.targetScope)) {
         return reply.code(403).send(fail(4034, '无权审核该范围的提交'))
       }
       db.prepare(
@@ -698,7 +669,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
     ).get(id, claims.sub) as { state: string; docId: string | null } | undefined
     if (!row) return reply.code(404).send(fail(4041, '提交不存在'))
     if (row.state === 'approved' && row.docId) {
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
       const doc = db.prepare(
         `SELECT owner_id AS ownerId, scope_id AS scopeId, status FROM documents WHERE id=?`
       ).get(row.docId) as { ownerId: string | null; scopeId: string; status: string } | undefined

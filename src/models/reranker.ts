@@ -1,3 +1,4 @@
+import { meteredFetch } from '../gateway/usage.js'
 import type { Config } from '../config.js'
 
 export interface RerankItem {
@@ -37,7 +38,7 @@ class RemoteReranker implements Reranker {
   ) {}
 
   async rerank(query: string, items: RerankItem[]): Promise<RerankResult[]> {
-    const res = await fetch(this.url, {
+    const res = await meteredFetch(this.url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -49,7 +50,7 @@ class RemoteReranker implements Reranker {
         documents: items.map((i) => i.text)
       }),
       signal: AbortSignal.timeout(RERANK_TIMEOUT_MS * 4)
-    })
+    }, {source:'rerank',model:this.model})
     if (!res.ok) {
       throw new Error(`rerank API ${res.status}: ${(await res.text()).slice(0, 200)}`)
     }

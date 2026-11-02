@@ -69,7 +69,7 @@ export function canPublishDocument(
   if (!canAccessScope(ctx, scopeId)) return false
   if (scope.kind === 'personal') return scope.ownerUserId === ctx.userId
   if (scope.kind === 'team') return true
-  return role === 'curator'
+  return true
 }
 
 export function canAccessDocument(

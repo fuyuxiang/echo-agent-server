@@ -178,7 +178,7 @@ describe('模型配置热加载', () => {
       headers: bearer(token)
     })
     expect(get2.statusCode).toBe(200)
-    expect(get2.json().data.configured).toBe(true)
+    expect(get2.json().data.configured).toBe(false) // no upstream credential was configured
     expect(get2.json().data.runtime.embedder).toBe('embed-v3')
     expect(get2.json().data.runtime.reranker).toBe('rerank-v3')
   })

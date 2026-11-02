@@ -1,3 +1,8 @@
+import { registerSecurityCheckRoutes } from './routes/security-checks.js'
+import { registerReviewLocks } from './operations/review-lock.js'
+import { usageContext } from './gateway/usage.js'
+import { registerGatewayAdminRoutes } from './routes/gateway-admin.js'
+import { registerOperationsRoutes } from './routes/operations.js'
 import Fastify, { type FastifyInstance } from 'fastify'
 import jwt from '@fastify/jwt'
 import multipart from '@fastify/multipart'
@@ -28,6 +33,7 @@ import { probeAntivirus } from './security/content-scanner.js'
 import { registerKnowledgeAskRoutes } from './routes/knowledge-ask.js'
 import { registerKnowledgeContextRoutes } from './routes/knowledge-context.js'
 import { registerSkillRoutes } from './routes/skills.js'
+import { registerKnowledgeLibraryRoutes } from './routes/knowledge-library.js'
 import { registerMcpRoutes } from './mcp.js'
 import { registerWeb } from './web.js'
 import { createOcrClient } from './kb/services/ocr.js'
@@ -104,6 +110,9 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   // 上述已赋值的字段不受 opts.overrides 影响。
   if (opts.overrides) Object.assign(deps, opts.overrides)
 
+  app.addHook('onRequest', (req, _reply, done) => {
+    usageContext.run({ db, cfg: deps.cfg, taskId: req.id, source: req.url.startsWith('/api/v1/knowledge') ? 'knowledge_ask' : undefined }, done)
+  })
   app.decorate('deps', deps)
   app.decorate('audit', makeAudit(db, (e) => warn(`审计写入失败: ${String(e)}`)))
 
@@ -232,6 +241,7 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
     }
   })
 
+  registerReviewLocks(app)
   registerAuthRoutes(app)
   registerBootstrapRoutes(app)
   registerRetrieveRoutes(app)
@@ -242,9 +252,13 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   registerDocsRoutes(app)
   registerDocumentSubmissionRoutes(app)
   registerSkillRoutes(app)
+  registerKnowledgeLibraryRoutes(app)
   registerPromotionRoutes(app)
   registerMemoryRoutes(app)
   registerLlmRoutes(app)
+  registerGatewayAdminRoutes(app)
+  registerOperationsRoutes(app)
+  registerSecurityCheckRoutes(app)
   registerSyncRoutes(app)
   registerQualityRoutes(app)
   registerMcpRoutes(app, {

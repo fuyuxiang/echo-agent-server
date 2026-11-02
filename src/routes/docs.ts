@@ -23,7 +23,8 @@ const ListQuery = z.object({
 })
 
 const PatchSchema = z.object({
-  title: z.string().min(1).optional(),
+  ifUnmodifiedSince:z.number().int().optional(),
+  title: z.string().trim().min(1).max(500).optional(),
   scopeId: z.string().optional(),
   sensitivity: z.coerce.number().int().min(0).max(2).optional(),
   volatility: z.enum(['stable', 'volatile']).optional(),
@@ -33,6 +34,32 @@ const PatchSchema = z.object({
 
 export function registerDocsRoutes(app: FastifyInstance): void {
   const { db, cfg, storage } = app.deps
+
+
+  app.get('/api/v1/docs/capabilities',{preHandler:app.authenticate},async(_req,reply)=>{
+    const types=await Promise.all(SUPPORTED_EXTENSIONS.map(async ext=>{const type=sourceTypeFromName(`file${ext.startsWith('.')?ext:'.'+ext}`);const reason=type?await sourceCapabilityError(type,app.deps):'不支持';return {extension:ext,sourceType:type,available:!reason,reason}}))
+    return reply.send(ok({types,maxUploadBytes:cfg.maxUploadBytes}))
+  })
+  app.get('/api/v1/docs/:id/versions',{preHandler:app.authenticate},async(req,reply)=>{
+    const c=(req as AuthedRequest).claims,ctx=loadManagementContext(db,c.sub,c.role),{id}=req.params as {id:string}
+    const doc=db.prepare('SELECT family_id AS familyId,scope_id AS scopeId,sensitivity FROM documents WHERE id=?').get(id) as any
+    if(!doc||!ctx.scopeIds.includes(doc.scopeId)||doc.sensitivity>ctx.clearance)return reply.code(404).send(fail(4041,'文档不存在或无权访问'))
+    const family=db.prepare('SELECT id,canonical_title AS title,current_document_id AS currentDocumentId,state FROM document_families WHERE id=?').get(doc.familyId)
+    const versions=db.prepare(`SELECT id,title,version,status,fail_reason AS failReason,fts_status AS ftsStatus,vector_status AS vectorStatus,index_model_version AS indexModelVersion,created_at AS createdAt,updated_at AS updatedAt,indexed_at AS indexedAt FROM documents WHERE family_id=? AND sensitivity<=? ORDER BY version DESC,created_at DESC`).all(doc.familyId,ctx.clearance)
+    const jobs=db.prepare(`SELECT j.id,j.doc_id AS docId,j.stage,j.state,j.attempts,j.last_error AS lastError,j.updated_at AS updatedAt FROM ingest_jobs j JOIN documents d ON d.id=j.doc_id WHERE d.family_id=? AND d.sensitivity<=? ORDER BY j.updated_at DESC LIMIT 100`).all(doc.familyId,ctx.clearance)
+    return reply.send(ok({family,versions,jobs}))
+  })
+  app.post('/api/v1/docs/:id/activate',{preHandler:[app.authenticate,requireCurator]},async(req,reply)=>{
+    const p=z.object({currentDocumentId:z.string().nullable(),note:z.string().trim().min(1).max(2000)}).safeParse(req.body)
+    if(!p.success)return reply.code(400).send(fail(4001,'请填写当前版本和变更原因'))
+    const c=(req as AuthedRequest).claims,ctx=loadManagementContext(db,c.sub,c.role),{id}=req.params as {id:string}
+    const doc=db.prepare('SELECT * FROM documents WHERE id=?').get(id) as any
+    if(!doc||!ctx.scopeIds.includes(doc.scope_id)||doc.sensitivity>ctx.clearance)return reply.code(404).send(fail(4041,'版本不存在'))
+    if(doc.status!=='ready'||doc.fts_status!=='ready')return reply.code(409).send(fail(4091,'只能启用已完成处理的版本'))
+    const change=db.prepare(`UPDATE document_families SET current_document_id=?,state='active',updated_at=? WHERE id=? AND current_document_id IS ?`).run(id,Date.now(),doc.family_id,p.data.currentDocumentId)
+    if(!change.changes)return reply.code(409).send(fail(4091,'当前版本已变更，请刷新后重试'))
+    app.audit(req,'patch',doc.family_id,{activatedVersion:id,note:p.data.note});return reply.send(ok({updated:true}))
+  })
 
   /**
    * 上传。
@@ -164,10 +191,13 @@ export function registerDocsRoutes(app: FastifyInstance): void {
     const where: string[] = [
       `d.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})`,
       'd.sensitivity <= ?',
-      "f.state = 'active'",
-      "(d.status != 'ready' OR f.current_document_id = d.id)"
+      status==='archived'?"f.state = 'archived'":"f.state = 'active'",
+      status ? "(d.status != 'ready' OR f.current_document_id = d.id)" : "d.id=(SELECT latest.id FROM documents latest WHERE latest.family_id=f.id AND latest.status!='archived' ORDER BY latest.version DESC, latest.created_at DESC,latest.id DESC LIMIT 1)"
     ]
     const params: unknown[] = [...ctx.scopeIds, ctx.clearance]
+    if (view === 'manage' && claims.role === 'admin') {
+      where.push("d.scope_id IN (SELECT id FROM v_effective_scopes WHERE kind IN ('org','team'))")
+    }
 
     if (scopeId) {
       where.push('d.scope_id = ?')
@@ -207,7 +237,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
         `SELECT d.id, d.title, d.source_type AS sourceType, d.status, d.fail_reason AS failReason,
                 d.byte_size AS byteSize, d.sensitivity, d.volatility, d.version,
                 d.created_at AS createdAt, d.updated_at AS updatedAt, d.indexed_at AS indexedAt,
-                d.fts_status AS ftsStatus, d.vector_status AS vectorStatus,
+                f.current_document_id AS currentDocumentId, d.fts_status AS ftsStatus, d.vector_status AS vectorStatus,
                 d.index_model_version AS indexModelVersion,
                 s.kind AS scopeKind, s.name AS scopeName, s.id AS scopeId,
                 u.display_name AS ownerName, d.owner_id AS ownerId,
@@ -474,14 +504,17 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
       const ctx = loadManagementContext(db, claims.sub, claims.role)
-      const current = db.prepare('SELECT scope_id AS scopeId, sensitivity, status FROM documents WHERE id=?')
-        .get(id) as { scopeId: string; sensitivity: number; status: string } | undefined
+      const current = db.prepare('SELECT scope_id AS scopeId, sensitivity, updated_at AS updatedAt,status FROM documents WHERE id=?')
+        .get(id) as { scopeId: string; sensitivity: number; updatedAt:number;status: string } | undefined
       if (!current || current.status === 'archived' || !canAccessScope(ctx, current.scopeId) ||
           current.sensitivity > ctx.clearance) {
         return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
       }
 
       const v = parsed.data
+      if(v.ifUnmodifiedSince!==undefined&&v.ifUnmodifiedSince!==current.updatedAt)return reply.code(409).send(fail(4091,'文档已被其他人更新，请刷新后重试'))
+      if(v.sensitivity!==undefined&&v.sensitivity>ctx.clearance)return reply.code(403).send(fail(4031,'不能设置高于自身权限的密级'))
+      if(v.ownerId&&!db.prepare("SELECT 1 FROM users WHERE id=? AND status='active'").get(v.ownerId))return reply.code(400).send(fail(4001,'维护人不存在或已停用'))
 
       // scope 与 sensitivity 调整是授权边界变化,不允许 curator 跨范围移动
       // 或扩大可见性 —— 否则一个可访问某文档的 curator 可以把文档移入
@@ -507,13 +540,16 @@ export function registerDocsRoutes(app: FastifyInstance): void {
 
       db.transaction(() => {
         if (sets.length) {
-          sets.push('updated_at = ?')
+          sets.push('updated_at = MAX(updated_at+1, ?)')
           params.push(Date.now())
           db.prepare(`UPDATE documents SET ${sets.join(', ')} WHERE id = ?`).run(...params, id)
         }
         // chunks 冗余了 scope_id/sensitivity 以免检索时 join,所以这里必须
         // 同步 —— 漏掉会让权限变更对已索引内容失效。
         if (v.scopeId !== undefined || v.sensitivity !== undefined) {
+          const family=(db.prepare('SELECT family_id AS id FROM documents WHERE id=?').get(id) as any).id
+          db.prepare('UPDATE documents SET scope_id=COALESCE(?,scope_id),sensitivity=COALESCE(?,sensitivity),updated_at=? WHERE family_id=?').run(v.scopeId??null,v.sensitivity??null,Date.now(),family)
+          db.prepare(`UPDATE chunks SET scope_id=(SELECT scope_id FROM documents WHERE documents.id=chunks.doc_id),sensitivity=(SELECT sensitivity FROM documents WHERE documents.id=chunks.doc_id) WHERE doc_id IN (SELECT id FROM documents WHERE family_id=?)`).run(family)
           db.prepare(
             `UPDATE chunks SET
                scope_id = (SELECT scope_id FROM documents WHERE id = ?),

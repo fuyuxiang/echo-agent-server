@@ -1,3 +1,4 @@
+import { meteredFetch } from '../../gateway/usage.js'
 import type { Config } from '../../config.js'
 import type { EffectiveChatConfig } from '../../models/chat-config.js'
 
@@ -58,12 +59,12 @@ export function createTranscriptionClient(
       const timer = setTimeout(() => ctrl.abort(), timeoutMs)
       let response: Response
       try {
-        response = await fetch(url, {
+        response = await meteredFetch(url, {
           method: 'POST',
           headers: key ? { authorization: `Bearer ${key}` } : {},
           body: form,
           signal: ctrl.signal
-        })
+        }, {source:'transcription',model:model,units:{inputBytes:buf.length}})
       } catch (error) {
         if (ctrl.signal.aborted) throw new Error(`转写服务请求超时（${timeoutMs}ms）`)
         throw error

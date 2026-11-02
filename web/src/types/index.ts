@@ -26,13 +26,14 @@ export interface User {
   status: UserStatus
   // 0 公开 / 1 内部 / 2 机密。用户可见 sensitivity <= clearance 的文档。
   clearance: number
+  departmentId?: string | null
   tokenVersion: number
   createdAt: number
   lastSeenAt: number | null
   groups?: { id: string; name: string }[]
 }
 
-export type ScopeKind = 'org' | 'team'
+export type ScopeKind = 'org' | 'team' | 'personal'
 
 export interface Scope {
   id: string
@@ -115,6 +116,12 @@ export interface OrgMemory {
   kind: MemoryKind
   content: string
   rationale: string | null
+  trust?: 'reported' | 'reviewed' | 'verified'
+  evidence?: Array<{type:string;id:string;loc?:string}>
+  outcome?: string | null
+  sourceTaskId?: string | null
+  workspaceRef?: string | null
+  validFrom?: number | null
   confidence: number
   hitCount: number
   validUntil: number | null
@@ -251,9 +258,12 @@ export interface EnterprisePolicy {
 }
 
 export interface QualityOverview {
+  contributions?:{id:string;displayName:string;documents:number;memories:number;skills:number;citations:number}[]
   windowDays: number
   total: number
   unansweredRate: number
+  feedbackCount?: number
+  feedbackCoverage?: number
   negativeRate: number
   // 超过 25% 说明客户端 router 判定过松,token 在浪费。
   agenticRate: number

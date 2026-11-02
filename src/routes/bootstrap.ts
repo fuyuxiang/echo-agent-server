@@ -11,16 +11,16 @@ const POLICY_TTL_MS = 24 * 60 * 60_000
 
 interface PolicyRow {
   version: number
-  allowLocalKnowledge: number
-  allowPersonalCloud: number
-  allowSkillSubmission: number
-  offlineEnterpriseContent: number
+  allowLocalKnowledge: boolean
+  allowPersonalCloud: boolean
+  allowSkillSubmission: boolean
+  offlineEnterpriseContent: boolean
   managedSkillLeaseHours: number
   updatedAt: number
 }
 
 function readPolicy(app: FastifyInstance): PolicyRow {
-  return app.deps.db.prepare(
+  const row=app.deps.db.prepare(
     `SELECT version, allow_local_knowledge AS allowLocalKnowledge,
             allow_personal_cloud AS allowPersonalCloud,
             allow_skill_submission AS allowSkillSubmission,
@@ -29,6 +29,7 @@ function readPolicy(app: FastifyInstance): PolicyRow {
             updated_at AS updatedAt
        FROM enterprise_policy WHERE id='default'`
   ).get() as PolicyRow
+  return {...row,allowLocalKnowledge:!!row.allowLocalKnowledge,allowPersonalCloud:!!row.allowPersonalCloud,allowSkillSubmission:!!row.allowSkillSubmission,offlineEnterpriseContent:!!row.offlineEnterpriseContent}
 }
 
 /**
@@ -74,6 +75,7 @@ export function registerBootstrapRoutes(app: FastifyInstance): void {
 
     return reply.send(ok({
       apiVersion: 1,
+      publication: { mode: 'automatic-safety', humanApprovalRequired: false },
       user: {
         id: user.id,
         username: user.username,

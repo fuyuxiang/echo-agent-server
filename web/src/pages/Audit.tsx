@@ -1,97 +1,14 @@
-import { useEffect, useState, useCallback } from 'react'
-import { Table, Tag, Space, Select, Alert } from 'antd'
+import { useCallback,useEffect,useRef,useState } from 'react'
+import { Alert,Button,Drawer,Select,Space,Table,Tag } from 'antd'
 import * as api from '../api'
-import type { AuditLog } from '../types'
+import client from '../api/client'
+import type { AuditLog,User } from '../types'
 import { fmtTime } from '../utils/format'
-
-const ACTIONS: Record<string, { label: string; color?: string }> = {
-  login: { label: '登录' },
-  login_failed: { label: '登录失败', color: 'orange' },
-  logout: { label: '登出' },
-  retrieve: { label: '检索' },
-  upload: { label: '上传', color: 'blue' },
-  delete: { label: '下线', color: 'red' },
-  approve: { label: '审核通过', color: 'green' },
-  reject: { label: '审核驳回', color: 'orange' },
-  config_change: { label: '配置变更', color: 'purple' },
-  model_config_download: { label: '模型配置下载', color: 'blue' },
-  user_change: { label: '用户变更', color: 'purple' },
-}
-
-export default function Audit() {
-  const [items, setItems] = useState<AuditLog[]>([])
-  const [action, setAction] = useState<string | undefined>()
-  const [loading, setLoading] = useState(false)
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      setItems(await api.listAudit({ action, limit: 200 }))
-    } finally {
-      setLoading(false)
-    }
-  }, [action])
-
-  useEffect(() => { void load() }, [load])
-
-  return (
-    <>
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        message="只记录操作行为,不记录检索到的内容"
-        description="否则审计表本身会变成一份绕过权限的知识副本。"
-      />
-
-      <Space style={{ marginBottom: 16 }}>
-        <Select
-          allowClear
-          placeholder="按操作类型筛选"
-          style={{ width: 180 }}
-          value={action}
-          onChange={setAction}
-          options={Object.entries(ACTIONS).map(([k, v]) => ({ value: k, label: v.label }))}
-        />
-      </Space>
-
-      <Table
-        rowKey="id"
-        loading={loading}
-        dataSource={items}
-        pagination={{ pageSize: 50, showTotal: (n) => `共 ${n} 条` }}
-        columns={[
-          { title: '时间', dataIndex: 'createdAt', width: 160, render: fmtTime },
-          {
-            title: '操作人',
-            dataIndex: 'actorName',
-            width: 120,
-            render: (n: string | null) => n ?? <span style={{ color: '#bbb' }}>系统</span>,
-          },
-          {
-            title: '操作',
-            dataIndex: 'action',
-            width: 120,
-            render: (a: string) => {
-              const meta = ACTIONS[a]
-              return <Tag color={meta?.color}>{meta?.label ?? a}</Tag>
-            },
-          },
-          {
-            title: '对象',
-            dataIndex: 'target',
-            render: (t: string | null) =>
-              t ? <span style={{ fontSize: 12, fontFamily: 'monospace' }}>{t}</span> : '—',
-          },
-          {
-            title: '详情',
-            dataIndex: 'detail',
-            render: (d: string | null) =>
-              d ? <span style={{ fontSize: 12, color: '#666' }}>{d}</span> : '—',
-          },
-          { title: 'IP', dataIndex: 'ip', width: 130, render: (i: string | null) => i ?? '—' },
-        ]}
-      />
-    </>
-  )
+const actions:Record<string,string>={auto_publish:'自动发布',security_scan_failed:'安全检查未通过',security_scan_retry:'重新安全检查',login:'登录',login_failed:'登录失败',logout:'退出',retrieve:'知识检索',upload:'上传',delete:'下线',approve:'审核通过',reject:'审核退回',config_change:'配置变更',model_config_download:'模型配置同步',user_change:'账号或密钥变更',llm_chat:'模型调用',usage_export:'用量导出',usage_reconcile:'用量核对',maintenance_change:'质量维护',conflict_resolve:'矛盾裁决',skill_disable:'技能停用',skill_rollback:'技能回退',enterprise_policy_update:'客户端策略变更'}
+export default function Audit(){
+ const [items,setItems]=useState<AuditLog[]>([]),[total,setTotal]=useState(0),[page,setPage]=useState(1),[days,setDays]=useState(30),[action,setAction]=useState<string>(),[actorId,setActor]=useState<string>(),[users,setUsers]=useState<User[]>([]),[loading,setLoading]=useState(false),[error,setError]=useState(''),[detail,setDetail]=useState<AuditLog|null>(null),[snapshot,setSnapshot]=useState(Date.now()),seq=useRef(0)
+ const load=useCallback(async()=>{const n=++seq.current;setLoading(true);setError('');try{const r:any=await client.get('/api/v1/admin/audit',{params:{action,actorId,from:snapshot-days*86400_000,to:snapshot,page,limit:50}});if(n===seq.current){setItems(r.items);setTotal(r.total)}}catch{setError('审计日志加载失败')}finally{if(n===seq.current)setLoading(false)}},[action,actorId,days,page,snapshot])
+ useEffect(()=>{void load();return()=>{seq.current++}},[load]);useEffect(()=>{void api.listUsers().then(setUsers).catch(()=>{})},[])
+ const reset=(f:()=>void)=>{f();setPage(1);setSnapshot(Date.now())}
+ return <Space direction="vertical" size={16} style={{width:'100%'}}><Alert showIcon type="info" message="记录关键操作与必要元数据，不保存模型密钥、完整对话或检索正文。"/>{error&&<Alert type="error" message={error} action={<Button onClick={()=>void load()}>重试</Button>}/>}<div className="echo-section-top"><Space wrap><Select allowClear placeholder="全部操作" style={{width:180}} value={action} onChange={v=>reset(()=>setAction(v))} options={Object.entries(actions).map(([value,label])=>({value,label}))}/><Select allowClear showSearch optionFilterProp="label" placeholder="全部操作人" style={{width:160}} value={actorId} onChange={v=>reset(()=>setActor(v))} options={users.map(u=>({value:u.id,label:u.displayName}))}/><Select value={days} onChange={v=>reset(()=>setDays(v))} options={[{value:7,label:'近 7 天'},{value:30,label:'近 30 天'},{value:90,label:'近 90 天'},{value:365,label:'近一年'}]}/></Space><Button onClick={()=>reset(()=>{})}>刷新</Button></div><Table scroll={{x:900}} rowKey="id" loading={loading} dataSource={items} pagination={{current:page,pageSize:50,total,onChange:setPage,showSizeChanger:false,showTotal:n=>`共 ${n} 条`}} columns={[{title:'时间',dataIndex:'createdAt',width:170,render:fmtTime},{title:'操作人',dataIndex:'actorName',render:(s:string)=>s??'系统'},{title:'操作',dataIndex:'action',render:(s:string)=><Tag>{actions[s]??s}</Tag>},{title:'对象',dataIndex:'target',ellipsis:true},{title:'来源 IP',dataIndex:'ip',width:150},{title:'',width:80,render:(_:unknown,r:AuditLog)=><Button type="link" onClick={()=>setDetail(r)}>详情</Button>}]}/><Drawer title="操作记录" open={!!detail} onClose={()=>setDetail(null)} width={540}>{detail&&<><p>操作：{actions[detail.action]??detail.action}</p><p>时间：{fmtTime(detail.createdAt)}</p><p>对象：{detail.target??'—'}</p><pre className="echo-json">{detail.detail?JSON.stringify(JSON.parse(detail.detail),null,2):'无附加详情'}</pre></>}</Drawer></Space>
 }

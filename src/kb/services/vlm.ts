@@ -1,3 +1,4 @@
+import { meteredFetch } from '../../gateway/usage.js'
 /**
  * VLM caption 客户端。
  *
@@ -75,7 +76,7 @@ export function createVlmClient(
       model: chat.model,
       async caption(buf: Buffer, mime: string, prompt = CAPTION_PROMPT, maxTokens = 1200): Promise<string> {
         const image = await imageForChat(buf, mime)
-        const res = await fetch(`${chat.baseUrl}/chat/completions`, {
+        const res = await meteredFetch(`${chat.baseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
             authorization: `Bearer ${chat.key}`,
@@ -91,7 +92,7 @@ export function createVlmClient(
             ] }]
           }),
           signal: AbortSignal.timeout(90_000)
-        })
+        }, {source:'vision',model:cfg?.vlmModel??'vision'})
         if (!res.ok) throw new Error(`M3 图片理解 API ${res.status}: ${(await res.text()).slice(0, 200)}`)
         const data = await res.json() as { choices?: Array<{ message?: { content?: unknown } }> }
         const text = responseText(data.choices?.[0]?.message?.content)
@@ -117,11 +118,11 @@ export function createVlmClient(
       form.append('max_tokens', '300')
       form.append('lang', 'zh')
       if (model) form.append('model', model)
-      const res = await fetch(url, {
+      const res = await meteredFetch(url, {
         method: 'POST',
         headers: key ? { authorization: `Bearer ${key}` } : {},
         body: form
-      })
+      }, {source:'vision',model:cfg?.vlmModel??'vision'})
       if (!res.ok) throw new Error(`vlm API ${res.status}`)
       const j = (await res.json()) as { caption?: string; text?: string }
       const text = (j.caption ?? j.text ?? '').trim()

@@ -1,57 +1,15 @@
-import { randomUUID, createHash } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { ok, fail } from '../reply.js'
 import { requireCurator, type AuthedRequest } from '../auth/jwt.js'
-import { loadAccessContext, canAccessScope } from '../auth/scopes.js'
-import { enqueueIngest } from '../kb/ingest/worker.js'
-import { createDocumentFamily } from '../dao/documents.js'
-import { scanDocument } from '../security/content-scanner.js'
+import { loadAccessContext, loadManagementContext, canAccessScope } from '../auth/scopes.js'
+import { MemoryPayload, DocumentPayload } from '../operations/publication-payloads.js'
+import { processPublication } from '../operations/automatic-publication.js'
 
-/**
- * 知识提升。
- *
- * 这是"知识双向流动"的落点:员工日常工作(会议、问答、任务)产出候选知识,
- * 经审核后进入组织库。三条设计约束:
- *
- *   1. 提升永远是显式的 —— 系统绝不自动把个人内容上传;
- *   2. 审核人可在通过前直接修订 —— 否则提交人反复返工,没人愿意再提;
- *   3. 提交本身不写知识库 —— payload 存在 promotions 里,通过时才落库。
+/** Members explicitly share knowledge; technical safety checks publish it automatically.
+ * Existing submission/history endpoints retain their wire states for desktop compatibility.
  */
-
-const MemoryPayload = z.object({
-  kind: z.enum(['fact', 'decision', 'convention', 'pitfall', 'howto']),
-  content: z.string().min(1).max(2000),
-  rationale: z.string().max(2000).optional(),
-  evidence: z
-    .array(
-      z.object({
-        type: z.enum(['doc', 'qa', 'meeting', 'task']),
-        id: z.string().min(1).max(256),
-        loc: z.string().max(1000).optional()
-      })
-    )
-    .max(20)
-    .optional(),
-  confidence: z.coerce.number().min(0).max(1).default(0.7),
-  observedAt: z.coerce.number().int().optional(),
-  validFrom: z.coerce.number().int().optional(),
-  validUntil: z.coerce.number().int().optional(),
-  supersedesId: z.string().max(256).optional(),
-  sourceSessionId: z.string().max(256).optional(),
-  sourceTaskId: z.string().max(256).optional(),
-  workspaceRef: z.string().max(1000).optional(),
-  outcome: z.string().max(2000).optional(),
-  sensitivity: z.coerce.number().int().min(0).max(3).default(0)
-})
-
-const DocumentPayload = z.object({
-  title: z.string().min(1).max(500),
-  // 会议纪要、问答结论这类文本直接内联,不走文件上传。
-  text: z.string().min(1),
-  sourceType: z.enum(['meeting', 'qa', 'md', 'txt']).default('meeting'),
-  volatility: z.enum(['stable', 'volatile']).optional()
-})
 
 const CreateSchema = z.object({
   payloadType: z.enum(['document', 'memory']),
@@ -76,7 +34,7 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
     }
     const { payloadType, payload, source, targetScope } = parsed.data
     const claims = (req as AuthedRequest).claims
-    const ctx = loadAccessContext(db, claims.sub)
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
 
     // 只能往自己看得见的范围提 —— 否则可以往任意部门投递内容。
     if (!canAccessScope(ctx, targetScope)) {
@@ -98,9 +56,9 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
       }
       if (memory.supersedesId) {
         const prior = db.prepare(
-          'SELECT scope_id AS scopeId FROM org_memories WHERE id=?'
-        ).get(memory.supersedesId) as { scopeId: string } | undefined
-        if (!prior || prior.scopeId !== targetScope || !canAccessScope(ctx, prior.scopeId)) {
+          'SELECT scope_id AS scopeId,author_id AS authorId FROM org_memories WHERE id=?'
+        ).get(memory.supersedesId) as { scopeId: string; authorId: string } | undefined
+        if (!prior || prior.scopeId !== targetScope || !canAccessScope(ctx, prior.scopeId) || (claims.role === 'member' && prior.authorId !== claims.sub)) {
           return reply.code(400).send(fail(4004, '被替代记忆不存在或不在目标范围'))
         }
       }
@@ -126,7 +84,8 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
       source,
       targetScope
     })
-    return reply.send(ok({ promotionId: id, state: 'pending' }))
+    const result = await processPublication(app, 'promotion', id)
+    return reply.code(result.scanStatus === 'failed' ? 422 : 200).send(result.scanStatus === 'failed' ? fail(4221, result.message ?? '安全检查未通过') : ok({ promotionId: id, ...result }))
   })
 
   /** 我提交的。员工需要看到自己那条到底通过了没有。 */
@@ -158,11 +117,11 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
       const q = req.query as Record<string, string>
       const state = q.state ?? 'pending'
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
 
-      const where = ['p.state = ?']
-      const params: unknown[] = [state]
-      if (claims.role !== 'admin') {
+      const where = ['p.state = ?',"COALESCE(json_extract(p.payload,'$.sensitivity'),0)<=?"]
+      const params: unknown[] = [state,ctx.clearance]
+      {
         if (ctx.scopeIds.length === 0) return reply.send(ok([]))
         where.push(`p.target_scope IN (${ctx.scopeIds.map(() => '?').join(',')})`)
         params.push(...ctx.scopeIds)
@@ -198,7 +157,7 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
       if (!parsed.success) return reply.code(400).send(fail(4001, '参数错误'))
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
 
       const promo = db
         .prepare(
@@ -219,112 +178,15 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
         | undefined
 
       if (!promo) return reply.code(404).send(fail(4041, '记录不存在'))
-      if (promo.state !== 'pending') {
-        return reply.code(409).send(fail(4093, `该记录已处理(${promo.state})`))
-      }
-      if (claims.role !== 'admin' && !canAccessScope(ctx, promo.targetScope)) {
+      if (!canAccessScope(ctx, promo.targetScope)) {
         return reply.code(403).send(fail(4034, '无权审核该范围的提交'))
       }
 
-      // 审核人的修订优先。这一步让"通过前顺手改一句"成为可能,是组织层
-      // 质量的关键闸门 —— 否则要么放低标准,要么让提交人反复返工。
-      const shape = promo.payloadType === 'memory' ? MemoryPayload : DocumentPayload
-      const merged = parsed.data.edits
-        ? shape.safeParse({ ...JSON.parse(promo.payload), ...(parsed.data.edits as object) })
-        : shape.safeParse(JSON.parse(promo.payload))
-      if (!merged.success) {
-        return reply.code(400).send(fail(4002, `修订后内容非法: ${merged.error.issues[0]?.message}`))
-      }
-
-      let resultId: string
-      if (promo.payloadType === 'memory') {
-        const v = merged.data as z.infer<typeof MemoryPayload>
-        if (v.sensitivity > ctx.clearance) {
-          return reply.code(403).send(fail(4036, '不能批准高于自身密级的组织记忆'))
-        }
-        resultId = randomUUID()
-        const now = Date.now()
-        db.transaction(() => {
-          db.prepare(
-            `INSERT INTO org_memories
-               (id, scope_id, kind, content, rationale, evidence, author_id,
-                confidence, status, observed_at, valid_from, valid_until,
-                supersedes_id, source_session_id, source_task_id, workspace_ref,
-                outcome, sensitivity, trust, created_at, updated_at)
-             VALUES (?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,'reviewed',?,?)`
-          ).run(
-            resultId,
-            promo.targetScope,
-            v.kind,
-            v.content,
-            v.rationale ?? null,
-            v.evidence ? JSON.stringify(v.evidence) : null,
-            promo.submitterId,
-            v.confidence,
-            v.observedAt ?? now,
-            v.validFrom ?? null,
-            v.validUntil ?? null,
-            v.supersedesId ?? null,
-            v.sourceSessionId ?? null,
-            v.sourceTaskId ?? null,
-            v.workspaceRef ?? null,
-            v.outcome ?? null,
-            v.sensitivity,
-            now,
-            now
-          )
-          if (v.supersedesId) {
-            db.prepare(
-              "UPDATE org_memories SET status='superseded', updated_at=? WHERE id=? AND scope_id=?"
-            ).run(now, v.supersedesId, promo.targetScope)
-          }
-        })()
-      } else {
-        const v = merged.data as z.infer<typeof DocumentPayload>
-        const buf = Buffer.from(v.text, 'utf8')
-        const hash = createHash('sha256').update(buf).digest('hex')
-        const report = await scanDocument(buf, v.sourceType, cfg)
-        if (report.status !== 'passed') {
-          return reply.code(422).send(fail(4221, '文档技术扫描未通过'))
-        }
-        const storageKey = await storage.put(buf, 'md', 'published/documents')
-        resultId = randomUUID()
-        const now = Date.now()
-        const familyId = createDocumentFamily(db, {
-          scopeId: promo.targetScope,
-          title: v.title,
-          ownerId: promo.submitterId,
-          now
-        })
-        db.prepare(
-          `INSERT INTO documents (id, scope_id, title, source_type, storage_key, content_hash,
-                                  byte_size, owner_id, sensitivity, volatility, status,
-                                  family_id, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,0,?,'pending',?,?,?)`
-        ).run(
-          resultId,
-          promo.targetScope,
-          v.title,
-          v.sourceType,
-          storageKey,
-          hash,
-          buf.length,
-          promo.submitterId,
-          v.volatility ?? 'stable',
-          familyId,
-          now,
-          now
-        )
-        enqueueIngest(db, resultId)
-      }
-
-      db.prepare(
-        `UPDATE promotions SET state='approved', reviewer_id=?, review_note=?,
-                               result_id=?, reviewed_at=? WHERE id=?`
-      ).run(claims.sub, parsed.data.note ?? null, resultId, Date.now(), id)
-
-      app.audit(req, 'approve', id, { payloadType: promo.payloadType, resultId })
-      return reply.send(ok({ state: 'approved', resultId }))
+      if (parsed.data.edits) return reply.code(400).send(fail(4001, '已改为自动安全检查；发布后的内容请在知识维护中修改'))
+      if (promo.state === 'approved') return reply.send(ok({ state: 'approved', resultId: (db.prepare('SELECT result_id AS id FROM promotions WHERE id=?').get(id) as any).id }))
+      if (promo.state !== 'pending') return reply.code(409).send(fail(4093, `该记录已处理(${promo.state})`))
+      const result = await processPublication(app, 'promotion', id)
+      return reply.send(ok(result))
     }
   )
 
@@ -340,7 +202,7 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
       }
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
 
       const promo = db
         .prepare('SELECT target_scope AS targetScope, state FROM promotions WHERE id = ?')
@@ -349,7 +211,7 @@ export function registerPromotionRoutes(app: FastifyInstance): void {
       if (promo.state !== 'pending') {
         return reply.code(409).send(fail(4093, `该记录已处理(${promo.state})`))
       }
-      if (claims.role !== 'admin' && !canAccessScope(ctx, promo.targetScope)) {
+      if (!canAccessScope(ctx, promo.targetScope)) {
         return reply.code(403).send(fail(4034, '无权审核该范围的提交'))
       }
 

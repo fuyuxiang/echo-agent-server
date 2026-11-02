@@ -26,7 +26,7 @@ async function doRefresh(): Promise<boolean> {
     // 用裸 axios,避免走本实例的拦截器造成递归。
     // 管理后台通常由 HttpOnly cookie 提供 refresh token；body 回退保留给
     // 旧会话和非浏览器客户端。
-    const res = await axios.post('/api/v1/auth/refresh', refreshToken ? { refreshToken } : {})
+    const res = await axios.post('/api/v1/admin/auth/refresh', refreshToken ? { refreshToken } : {})
     const body = res.data as Envelope<{ accessToken: string; refreshToken: string }>
     if (body.code !== 0) return false
     updateTokens(body.data.accessToken, body.data.refreshToken)
@@ -54,6 +54,18 @@ client.interceptors.response.use(
   async (error: AxiosError) => {
     const cfg = error.config as InternalAxiosRequestConfig & { _retried?: boolean }
     const status = error.response?.status
+    const body = error.response?.data as Envelope<unknown> | undefined
+    const authRequest = /\/auth\/(login|refresh)$/.test(cfg?.url ?? '')
+
+    if (authRequest) {
+      message.error(body?.msg || '登录失败，请检查账号和密码')
+      return Promise.reject(error)
+    }
+    if (status === 403 && body?.code === 4033) {
+      message.error(body.msg)
+      toLogin()
+      return Promise.reject(error)
+    }
 
     if (status === 401 && cfg && !cfg._retried) {
       cfg._retried = true
@@ -71,7 +83,6 @@ client.interceptors.response.use(
 
     // 服务端的业务错误信息比 axios 的 "Request failed with status code 403"
     // 有用得多,优先展示它。
-    const body = error.response?.data as Envelope<unknown> | undefined
     message.error(body?.msg || error.message || '网络错误')
     return Promise.reject(error)
   },

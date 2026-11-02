@@ -1,9 +1,13 @@
+import client from '../api/client'
+import { Modal, Table } from 'antd'
+import { fmtTime } from '../utils/format'
 import { useEffect, useState } from 'react'
-import { Alert, Button, Card, Form, InputNumber, Space, Spin, Switch, Typography, message } from 'antd'
+import { Alert, Button, Card, Form, InputNumber, Space, Spin, Switch, message } from 'antd'
 import * as api from '../api'
 import type { EnterprisePolicy as Policy } from '../types'
 
 export default function EnterprisePolicy(): JSX.Element {
+  const [history,setHistory]=useState<any[]|null>(null)
   const [policy, setPolicy] = useState<Policy | null>(null)
   const [saving, setSaving] = useState(false)
   useEffect(() => { void api.getEnterprisePolicy().then(setPolicy) }, [])
@@ -26,16 +30,17 @@ export default function EnterprisePolicy(): JSX.Element {
     } finally { setSaving(false) }
   }
   return <Space direction="vertical" size={16} style={{ width: '100%' }}>
-    <Typography.Title level={3} style={{ margin: 0 }}>托管客户端策略</Typography.Title>
     <Alert showIcon type="info" message={`当前签名策略版本：v${policy.version}`} description="客户端只接受服务端签名且未过期的策略，并拒绝版本回退。" />
-    <Card>
-      <Form labelCol={{ span: 8 }} wrapperCol={{ span: 12 }}>
+    <Card extra={<Button onClick={()=>void client.get('/api/v1/admin/enterprise-policy/history').then(x=>setHistory(x as unknown as any[])).catch(()=>{})}>历史版本</Button>}>
+      <Form layout="vertical" style={{ maxWidth: 560 }}>
         <Form.Item label="允许本地知识"><Switch checked={policy.allowLocalKnowledge} onChange={(value) => update('allowLocalKnowledge', value)} /></Form.Item>
         <Form.Item label="允许个人云知识"><Switch checked={policy.allowPersonalCloud} onChange={(value) => update('allowPersonalCloud', value)} /></Form.Item>
         <Form.Item label="允许提交 Skill"><Switch checked={policy.allowSkillSubmission} onChange={(value) => update('allowSkillSubmission', value)} /></Form.Item>
+        <Form.Item label="允许企业内容离线缓存" extra="关闭后将停止离线同步；离线设备在重新连接或租约到期后应用撤销。"><Switch checked={policy.offlineEnterpriseContent} onChange={(value) => update('offlineEnterpriseContent', value)} /></Form.Item>
         <Form.Item label="Skill 租约（小时）"><InputNumber min={1} max={168} value={policy.managedSkillLeaseHours} onChange={(value) => update('managedSkillLeaseHours', value ?? 24)} /></Form.Item>
-        <Form.Item wrapperCol={{ offset: 8 }}><Button type="primary" loading={saving} onClick={() => void save()}>签名发布</Button></Form.Item>
+        <Form.Item><Button type="primary" loading={saving} onClick={() => void save()}>签名发布</Button></Form.Item>
       </Form>
     </Card>
+    <Modal title="策略历史" open={!!history} onCancel={()=>setHistory(null)} footer={null}><Table rowKey="version" dataSource={history??[]} columns={[{title:'版本',dataIndex:'version',render:(v:number)=>`v${v}`},{title:'发布时间',dataIndex:'createdAt',render:fmtTime},{title:'',render:(_:unknown,h:any)=><Button onClick={()=>Modal.confirm({title:`恢复 v${h.version} 的策略内容？`,content:'会发布一个更高版本，客户端仍执行版本防回退校验。',onOk:async()=>{const p:any=await client.post(`/api/v1/admin/enterprise-policy/history/${h.version}/restore`);setPolicy(p);setHistory(null);message.success('已重新签名发布')}})}>恢复</Button>}]} /></Modal>
   </Space>
 }

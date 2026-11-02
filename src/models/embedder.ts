@@ -1,3 +1,4 @@
+import { meteredFetch } from '../gateway/usage.js'
 import type { Config } from '../config.js'
 
 export interface Embedder {
@@ -91,7 +92,7 @@ class RemoteEmbedder implements Embedder {
   }
 
   private async callOnce(texts: string[]): Promise<number[][]> {
-    const res = await fetch(this.url, {
+    const res = await meteredFetch(this.url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -99,7 +100,7 @@ class RemoteEmbedder implements Embedder {
       },
       body: JSON.stringify({ model: this.model, input: texts }),
       signal: AbortSignal.timeout(60_000)
-    })
+    }, {source:'embedding',model:this.model})
     if (!res.ok) {
       throw new Error(`embedding API ${res.status}: ${(await res.text()).slice(0, 200)}`)
     }

@@ -57,7 +57,7 @@ describe('api client', () => {
   // access token 只有 1 小时。不静默刷新的话,管理员填一半表单就会被踢回登录页。
   it('refreshes once on 401 and retries the request', async () => {
     saveAuth(AUTH)
-    bare.onPost('/api/v1/auth/refresh').reply(200, {
+    bare.onPost('/api/v1/admin/auth/refresh').reply(200, {
       code: 0,
       msg: 'ok',
       data: { accessToken: 'access-2', refreshToken: 'refresh-2' },
@@ -77,7 +77,7 @@ describe('api client', () => {
 
   it('keeps the session user when only tokens are refreshed', async () => {
     saveAuth(AUTH)
-    bare.onPost('/api/v1/auth/refresh').reply(200, {
+    bare.onPost('/api/v1/admin/auth/refresh').reply(200, {
       code: 0,
       msg: 'ok',
       data: { accessToken: 'access-2', refreshToken: 'refresh-2' },
@@ -93,7 +93,7 @@ describe('api client', () => {
 
   it('clears auth when refresh also fails', async () => {
     saveAuth(AUTH)
-    bare.onPost('/api/v1/auth/refresh').reply(401)
+    bare.onPost('/api/v1/admin/auth/refresh').reply(401)
     mock.onGet('/api/v1/docs').reply(401)
 
     await expect(client.get('/api/v1/docs')).rejects.toBeTruthy()
@@ -102,7 +102,7 @@ describe('api client', () => {
 
   it('does not retry more than once', async () => {
     saveAuth(AUTH)
-    bare.onPost('/api/v1/auth/refresh').reply(200, {
+    bare.onPost('/api/v1/admin/auth/refresh').reply(200, {
       code: 0,
       msg: 'ok',
       data: { accessToken: 'access-2', refreshToken: 'refresh-2' },
@@ -122,7 +122,7 @@ describe('api client', () => {
   it('shares one refresh across concurrent 401s', async () => {
     saveAuth(AUTH)
     let refreshCalls = 0
-    bare.onPost('/api/v1/auth/refresh').reply(() => {
+    bare.onPost('/api/v1/admin/auth/refresh').reply(() => {
       refreshCalls++
       return [200, { code: 0, msg: 'ok', data: { accessToken: 'a2', refreshToken: 'r2' } }]
     })
@@ -139,10 +139,23 @@ describe('api client', () => {
   })
 
   it('attempts HttpOnly-cookie refresh without a local refresh token', async () => {
-    bare.onPost('/api/v1/auth/refresh').reply(401)
+    bare.onPost('/api/v1/admin/auth/refresh').reply(401)
     mock.onGet('/api/v1/docs').reply(401)
     await expect(client.get('/api/v1/docs')).rejects.toBeTruthy()
     expect(bare.history.post.length).toBe(1)
     expect(bare.history.post[0].data).toBe('{}')
   })
+  it('shows a rejected console login without trying to renew another session', async () => {
+    mock.onPost('/api/v1/admin/auth/login').reply(401, { code: 4012, msg: '用户名或密码错误', data: null })
+    await expect(client.post('/api/v1/admin/auth/login', { username: 'wrong', password: 'wrong' })).rejects.toBeTruthy()
+    expect(bare.history.post).toHaveLength(0)
+  })
+  it('clears the console session when administrator permissions are removed', async () => {
+    saveAuth(AUTH)
+    mock.onGet('/api/v1/usage').reply(403, { code: 4033, msg: '管理员权限已失效，请重新登录', data: null })
+    await expect(client.get('/api/v1/usage')).rejects.toBeTruthy()
+    expect(loadAuth()).toBeNull()
+    expect(bare.history.post).toHaveLength(0)
+  })
+
 })

@@ -1,5 +1,6 @@
+import * as ops from '../api/operations'
 import { useEffect, useState, useCallback } from 'react'
-import { Table, Button, Modal, Form, Input, Select, Space, Tag, message, Alert } from 'antd'
+import { Table, Button, Modal, Form, Input, Select, Space, Tag, message, Alert, Popconfirm } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import * as api from '../api'
 import type { Group } from '../types'
@@ -7,6 +8,8 @@ import type { Group } from '../types'
 export default function Groups() {
   const [groups, setGroups] = useState<Group[]>([])
   const [loading, setLoading] = useState(false)
+  const [editing,setEditing]=useState<Group|null>(null)
+  const [saving,setSaving]=useState(false)
   const [open, setOpen] = useState(false)
   const [form] = Form.useForm()
 
@@ -40,6 +43,7 @@ export default function Groups() {
       render: (s: string | null) =>
         s ? <Tag color="geekblue">已配置</Tag> : <Tag color="warning">缺失</Tag>,
     },
+    {title:'操作',width:150,render:(_:unknown,g:Group)=><Space><Button type="link" onClick={()=>{setEditing(g);form.setFieldsValue({...g});setOpen(true)}}>编辑</Button><Popconfirm title="删除此分组？" description="仅空分组可删除，有成员、子分组或知识记录时会阻止删除。" onConfirm={async()=>{try{await ops.deleteGroup(g.id);message.success('已删除');void load()}catch{}}}><Button type="link" danger>删除</Button></Popconfirm></Space>},
     { title: '说明', dataIndex: 'description', render: (d: string | null) => d ?? '—' },
   ]
 
@@ -53,26 +57,30 @@ export default function Groups() {
         description="子分组成员自动继承上级分组的知识可见性,反之不成立 —— 上级看不到子分组的专属内容。每个分组会自动创建一个同名可见性单元,文档上传时可选。"
       />
 
-      <Space style={{ marginBottom: 16 }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>
+      <Space className="echo-toolbar" wrap>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => {setEditing(null);form.resetFields();setOpen(true)}}>
           新建分组
         </Button>
       </Space>
 
-      <Table rowKey="id" loading={loading} columns={columns} dataSource={groups} pagination={false} />
+      <Table scroll={{ x: 720 }} rowKey="id" loading={loading} columns={columns} dataSource={groups} pagination={false} />
 
       <Modal
         open={open}
-        title="新建分组"
+        title={editing?'编辑分组':'新建分组'}
+        confirmLoading={saving}
         onCancel={() => setOpen(false)}
         destroyOnClose
         onOk={async () => {
           const v = await form.validateFields()
-          await api.createGroup(v)
-          message.success('已创建,同时生成了对应的可见性单元')
+          setSaving(true)
+          try {
+          if(editing)await ops.patchGroup(editing.id,{...v,parentId:v.parentId??null});else await api.createGroup(v)
+          message.success(editing?'已更新':'已创建，并生成可见性单元')
           form.resetFields()
           setOpen(false)
           void load()
+          }catch{}finally{setSaving(false)}
         }}
       >
         <Form form={form} layout="vertical">
@@ -87,7 +95,7 @@ export default function Groups() {
             <Select
               allowClear
               placeholder="可选"
-              options={groups.map((g) => ({ value: g.id, label: g.name }))}
+              options={groups.filter(g=>g.id!==editing?.id).map((g) => ({ value: g.id, label: g.name }))}
             />
           </Form.Item>
           <Form.Item name="description" label="说明">

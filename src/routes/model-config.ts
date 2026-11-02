@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto'
+import { settings } from '../gateway/usage.js'
+import { deviceKey, gatewayBaseUrl } from '../gateway/keys.js'
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { ok, fail } from '../reply.js'
@@ -26,6 +29,7 @@ const PutSchema = z.object({
   chatBaseUrl: z.string().optional(),
   // 留空表示保留现有 Key,不是清空 —— 管理员改模型名时不该被迫重输密钥。
   chatKey: z.string().optional(),
+  clearCredential:z.boolean().optional(),
   embedModel: z.string().min(1),
   embedDim: z.coerce.number().int().positive(),
   rerankModel: z.string().optional(),
@@ -64,7 +68,7 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
   }
 
   /** 管理页面读取的脱敏模型配置。 */
-  app.get('/api/v1/model-config', { preHandler: app.authenticate }, async (_req, reply) => {
+  app.get('/api/v1/model-config', { preHandler: [app.authenticate,requireAdmin] }, async (_req, reply) => {
     const row = db.prepare('SELECT * FROM model_configs WHERE id = ?').get(ROW_ID) as
       | Record<string, unknown>
       | undefined
@@ -92,7 +96,7 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
 
     return reply.send(
       ok({
-        configured: true,
+        configured: chat.configured,
         chatProvider: chat.provider,
         chatModel: chat.model,
         chatBaseUrl: chat.baseUrl,
@@ -123,6 +127,8 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
     { preHandler: app.authenticate },
     async (req, reply) => {
       const chat = resolveChatConfig(db, cfg)
+      const claims = (req as AuthedRequest).claims
+      const issued = chat.configured ? deviceKey(db,cfg,claims.sub,claims.device ?? 'default') : null
       app.audit(req, 'model_config_download', ROW_ID, {
         configured: chat.configured,
         model: chat.model,
@@ -131,10 +137,13 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
       reply.header('cache-control', 'no-store')
       return reply.send(ok({
         configured: chat.configured,
-        chatProvider: chat.provider,
+        chatProvider: 'openai-compatible',
         chatModel: chat.model,
-        chatBaseUrl: chat.baseUrl,
-        chatKey: chat.configured ? chat.key : null,
+        configRevision: settings(db).revision,
+        chatBaseUrl: gatewayBaseUrl(db,`${req.protocol}://${req.host}`),
+        chatKey: issued?.key ?? null,
+        credentialId: issued?.id ?? null,
+        proxied: true,
         credentialError: chat.credentialError,
         source: chat.source
       }))
@@ -158,7 +167,9 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
           )
         )
       }
+      if(v.chatBaseUrl) {try { const url=new URL(v.chatBaseUrl); if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash) throw new Error() }catch{return reply.code(400).send(fail(4001,'上游地址必须为有效的 HTTP(S) Base URL'))}}
       const actor = (req as AuthedRequest).claims.sub
+      db.prepare('INSERT INTO model_config_history(id,config_json,gateway_json,actor_id,created_at) VALUES(?,?,?,?,?)').run(randomUUID(),JSON.stringify(db.prepare("SELECT * FROM model_configs WHERE id='default'").get()??null),JSON.stringify(db.prepare("SELECT * FROM gateway_settings WHERE id='default'").get()),actor,Date.now())
       const enc = v.chatKey ? encryptSecret(v.chatKey, masterKey) : null
 
       db.prepare(
@@ -170,7 +181,7 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
            chat_provider = excluded.chat_provider,
            chat_model    = excluded.chat_model,
            chat_base_url = excluded.chat_base_url,
-           chat_key_enc  = COALESCE(excluded.chat_key_enc, model_configs.chat_key_enc),
+           chat_key_enc  = CASE WHEN ? THEN NULL ELSE COALESCE(excluded.chat_key_enc, model_configs.chat_key_enc) END,
            embed_model   = excluded.embed_model,
            embed_dim     = excluded.embed_dim,
            rerank_model  = excluded.rerank_model,
@@ -188,9 +199,11 @@ export function registerModelConfigRoutes(app: FastifyInstance): void {
         v.rerankModel ?? null,
         v.vlmModel ?? null,
         actor,
-        Date.now()
+        Date.now(),
+        v.clearCredential?1:0
       )
 
+      db.prepare("UPDATE gateway_settings SET revision=revision+1,updated_at=? WHERE id='default'").run(Date.now())
       // 热加载:把 DB 行覆盖到 cfg 后,立刻重建 embedder 与 reranker,
       // 并赋回 app.deps。由于 Retriever(this.deps === app.deps)持有同一
       // 对象引用,下一次请求会同时拿到新实例 —— 不需要锁,不需要重启。

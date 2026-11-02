@@ -3,15 +3,16 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { ok, fail } from '../reply.js'
 import { requireCurator, type AuthedRequest } from '../auth/jwt.js'
-import { loadAccessContext, canAccessScope } from '../auth/scopes.js'
+import { loadAccessContext, loadManagementContext, canAccessScope, canPublishDocument } from '../auth/scopes.js'
 import { searchMemories } from '../kb/retrieve/recall.js'
 
 const PatchSchema = z.object({
+  ifUnmodifiedSince: z.number().int().optional(),
   kind: z.enum(['fact', 'decision', 'convention', 'pitfall', 'howto']).optional(),
   content: z.string().min(1).max(2000).optional(),
   rationale: z.string().max(2000).nullable().optional(),
   evidence: z.array(z.object({
-    type: z.enum(['doc', 'qa', 'meeting', 'task']),
+    type: z.enum(['doc', 'qa', 'meeting', 'task', 'memory']),
     id: z.string().min(1).max(256),
     loc: z.string().max(1000).optional()
   })).max(20).nullable().optional(),
@@ -43,7 +44,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       return reply.code(400).send(fail(4001, '查询参数过长'))
     }
     const claims = (req as AuthedRequest).claims
-    const ctx = loadAccessContext(db, claims.sub)
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
     if (ctx.scopeIds.length === 0) return reply.send(ok([]))
 
     const where = [
@@ -57,6 +58,9 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
     if (q.status) params.push(q.status)
     if (q.q) { where.push('m.content LIKE ?'); params.push(`%${q.q}%`) }
 
+    const paging=q.page!==undefined
+    const page=Math.max(1,Math.floor(Number(q.page)||1));const size=Math.min(100,Math.max(1,Math.floor(Number(q.size)||20)))
+    const total=(db.prepare(`SELECT COUNT(*) AS n FROM org_memories m WHERE ${where.join(' AND ')}`).get(...params) as any).n
     const rows = db
       .prepare(
         `SELECT m.id, m.kind, m.content, m.rationale, m.evidence, m.confidence,
@@ -73,14 +77,22 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
            LEFT JOIN users u ON u.id = m.author_id
           WHERE ${where.join(' AND ')}
           ORDER BY m.hit_count DESC, m.updated_at DESC
-          LIMIT 200`
+          LIMIT ? OFFSET ?`
       )
-      .all(...params) as Array<Record<string, unknown> & { evidence?: string | null }>
-    return reply.send(ok(rows.map((row) => ({
+      .all(...params,paging?size:200,paging?(page-1)*size:0) as Array<Record<string, unknown> & { evidence?: string | null }>
+    const items=rows.map((row) => ({
       ...row,
       evidence: parseEvidence(row.evidence),
       stale: typeof row.validUntil === 'number' && row.validUntil < Date.now()
-    }))))
+    }))
+    return reply.send(ok(paging?{items,total,page,size}:items))
+  })
+
+  app.get('/api/v1/memories/:id/versions',{preHandler:app.authenticate},async(req,reply)=>{
+    const c=(req as AuthedRequest).claims;const ctx=loadManagementContext(db,c.sub,c.role);const {id}=req.params as {id:string}
+    const mem=db.prepare('SELECT scope_id AS scopeId,sensitivity FROM org_memories WHERE id=?').get(id) as any
+    if(!mem||!ctx.scopeIds.includes(mem.scopeId)||mem.sensitivity>ctx.clearance)return reply.code(404).send(fail(4041,'经验不存在'))
+    return reply.send(ok(db.prepare('SELECT id,snapshot_json AS snapshot,actor_id AS actorId,created_at AS createdAt FROM memory_versions WHERE memory_id=? ORDER BY created_at DESC LIMIT 100').all(id)))
   })
 
   app.post('/api/v1/memories/search', { preHandler: app.authenticate }, async (req, reply) => {
@@ -90,8 +102,8 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
     if (!parsed.success) return reply.code(400).send(fail(4001, '参数错误'))
 
     const claims = (req as AuthedRequest).claims
-    const ctx = loadAccessContext(db, claims.sub)
-    return reply.send(ok(searchMemories(db, parsed.data.query, ctx, parsed.data.limit)))
+    const ctx = loadManagementContext(db, claims.sub, claims.role)
+    return reply.send(ok(searchMemories(db, parsed.data.query, loadAccessContext(db,claims.sub), parsed.data.limit)))
   })
 
   app.patch(
@@ -102,19 +114,20 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       if (!parsed.success) return reply.code(400).send(fail(4001, '参数错误'))
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
 
       const mem = db
         .prepare(
-          'SELECT scope_id AS scopeId, valid_from AS validFrom, valid_until AS validUntil FROM org_memories WHERE id = ?'
+          'SELECT scope_id AS scopeId, sensitivity, updated_at AS updatedAt, valid_from AS validFrom, valid_until AS validUntil FROM org_memories WHERE id = ?'
         )
-        .get(id) as { scopeId: string; validFrom: number | null; validUntil: number | null } | undefined
+        .get(id) as { scopeId: string; sensitivity: number; updatedAt: number; validFrom: number | null; validUntil: number | null } | undefined
       if (!mem) return reply.code(404).send(fail(4041, '记忆不存在'))
-      if (claims.role !== 'admin' && !canAccessScope(ctx, mem.scopeId)) {
+      if (!canAccessScope(ctx, mem.scopeId) || ('sensitivity' in mem && Number(mem.sensitivity) > ctx.clearance)) {
         return reply.code(403).send(fail(4035, '无权修改该记忆'))
       }
 
       const v = parsed.data
+      if(v.ifUnmodifiedSince!==undefined && mem.updatedAt!==v.ifUnmodifiedSince)return reply.code(409).send(fail(4091,'内容已被其他人更新，请刷新后重试'))
       if (v.sensitivity !== undefined && v.sensitivity > ctx.clearance) {
         return reply.code(403).send(fail(4036, '不能设置高于自身密级的组织记忆'))
       }
@@ -149,7 +162,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       if (v.status !== undefined) { sets.push('status = ?'); params.push(v.status) }
       if (sets.length === 0) return reply.send(ok({ updated: false }))
 
-      sets.push('updated_at = ?')
+      sets.push('updated_at = MAX(updated_at+1, ?)')
       params.push(Date.now())
       db.prepare(`UPDATE org_memories SET ${sets.join(', ')} WHERE id = ?`).run(...params, id)
       app.audit(req, 'memory_patch', id, { fields: Object.keys(v) })
@@ -164,13 +177,13 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
     async (req, reply) => {
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
 
       const mem = db
-        .prepare('SELECT scope_id AS scopeId FROM org_memories WHERE id = ?')
-        .get(id) as { scopeId: string } | undefined
+        .prepare('SELECT scope_id AS scopeId, sensitivity FROM org_memories WHERE id = ?')
+        .get(id) as { scopeId: string; sensitivity: number } | undefined
       if (!mem) return reply.code(404).send(fail(4041, '记忆不存在'))
-      if (claims.role !== 'admin' && !canAccessScope(ctx, mem.scopeId)) {
+      if (!canAccessScope(ctx, mem.scopeId) || ('sensitivity' in mem && Number(mem.sensitivity) > ctx.clearance)) {
         return reply.code(403).send(fail(4035, '无权删除该记忆'))
       }
 
@@ -195,17 +208,18 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
     { preHandler: [app.authenticate, requireCurator] },
     async (_req, reply) => {
       const claims = (_req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
 
       let where = ''
       const params: unknown[] = []
-      if (claims.role !== 'admin') {
+      {
         if (ctx.scopeIds.length === 0) return reply.send(ok([]))
         // 两侧都可见才允许读取冲突详情；只看见一侧时返回另一侧正文会泄密。
         where =
           `WHERE a.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})` +
           ` AND b.scope_id IN (${ctx.scopeIds.map(() => '?').join(',')})`
-        params.push(...ctx.scopeIds, ...ctx.scopeIds)
+        where += ' AND a.sensitivity<=? AND b.sensitivity<=?'
+        params.push(...ctx.scopeIds, ...ctx.scopeIds,ctx.clearance,ctx.clearance)
       }
 
       const rows = db
@@ -264,17 +278,17 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
 
       const { id } = req.params as { id: string }
       const claims = (req as AuthedRequest).claims
-      const ctx = loadAccessContext(db, claims.sub)
+      const ctx = loadManagementContext(db, claims.sub, claims.role)
 
       const c = db
         .prepare(
-          `SELECT a_id AS aId, b_id AS bId, resolution, a.scope_id AS aScopeId
+          `SELECT a_id AS aId, b_id AS bId, resolution, a.scope_id AS aScopeId, a.sensitivity AS aSensitivity
              FROM memory_conflicts c
              JOIN org_memories a ON a.id = c.a_id
             WHERE c.id = ?`
         )
         .get(id) as
-        | { aId: string; bId: string; resolution: string | null; aScopeId: string }
+        | { aId: string; bId: string; resolution: string | null; aScopeId: string; aSensitivity: number }
         | undefined
       if (!c) return reply.code(404).send(fail(4041, '矛盾不存在'))
       if (c.resolution) return reply.code(409).send(fail(4094, '该矛盾已处理'))
@@ -282,12 +296,10 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
       // curator 必须同时管理 a/b 两侧；决议会退休或合并两条记忆，只有一侧
       // 权限时允许操作会造成跨团队数据破坏。
       const bScope = db
-        .prepare('SELECT scope_id AS scopeId FROM org_memories WHERE id = ?')
-        .get(c.bId) as { scopeId: string } | undefined
+        .prepare('SELECT scope_id AS scopeId, sensitivity FROM org_memories WHERE id = ?')
+        .get(c.bId) as { scopeId: string; sensitivity: number } | undefined
       if (
-        claims.role !== 'admin' &&
-        (!canAccessScope(ctx, c.aScopeId) ||
-          !(bScope && canAccessScope(ctx, bScope.scopeId)))
+        !canAccessScope(ctx,c.aScopeId) || c.aSensitivity>ctx.clearance || !bScope || !canAccessScope(ctx,bScope.scopeId) || bScope.sensitivity>ctx.clearance
       ) {
         return reply.code(403).send(fail(4037, '无权处理该矛盾'))
       }
@@ -296,6 +308,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
         return reply.code(400).send(fail(4002, 'merge 必须提供 mergedContent'))
       }
 
+      if(parsed.data.mergedScopeId && (!canAccessScope(ctx,parsed.data.mergedScopeId)||!canPublishDocument(db,ctx,claims.role,parsed.data.mergedScopeId)))return reply.code(403).send(fail(4031,'无权向合并目标范围发布'))
       let resultId: string | null = null
       const now = Date.now()
 
@@ -318,8 +331,8 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
           db.prepare(
             `INSERT INTO org_memories
                (id, scope_id, kind, content, rationale, evidence, author_id,
-                confidence, status, created_at, updated_at)
-             VALUES (?,?,?,?,?,?,?,0.9,'active',?,?)`
+                confidence, sensitivity, trust,status, created_at, updated_at)
+             VALUES (?,?,?,?,?,?,?,0.9,?,'reviewed','active',?,?)`
           ).run(
             newId,
             parsed.data.mergedScopeId ?? c.aScopeId,
@@ -331,6 +344,7 @@ export function registerMemoryRoutes(app: FastifyInstance): void {
               { type: 'memory', id: c.bId }
             ]),
             claims.sub,
+            Math.max(c.aSensitivity,bScope?.sensitivity??0),
             now,
             now
           )

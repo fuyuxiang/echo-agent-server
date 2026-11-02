@@ -1,200 +1,23 @@
-import { useEffect, useState, useCallback } from 'react'
-import {
-  Table, Tag, Space, Input, Select, Button, Modal, Form, message, Popconfirm,
-  Alert, InputNumber, Tooltip,
-} from 'antd'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Alert, Button, Card, Drawer, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tabs, Tag, message } from 'antd'
 import * as api from '../api'
-import type { OrgMemory } from '../types'
+import * as ops from '../api/operations'
+import client from '../api/client'
 import { fmtTime, memoryKindLabel } from '../utils/format'
-import { canReview } from '../store/auth'
-
-const KINDS = ['fact', 'decision', 'convention', 'pitfall', 'howto']
-
-/**
- * 组织记忆 = 被提炼过的短陈述,区别于原始文档。
- *
- * 它比文档更直接:一条"报销单需直属上级先签"能直接注入提示词,而让模型从
- * 十页制度里自己找出这句话既慢又不可靠。
- */
-export default function Memories() {
-  const [items, setItems] = useState<OrgMemory[]>([])
-  const [loading, setLoading] = useState(false)
-  const [kind, setKind] = useState<string | undefined>()
-  const [keyword, setKeyword] = useState('')
-  const [editing, setEditing] = useState<OrgMemory | null>(null)
-  const editable = canReview()
-
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      setItems(await api.listMemories({ kind, q: keyword || undefined }))
-    } finally {
-      setLoading(false)
-    }
-  }, [kind, keyword])
-
-  useEffect(() => { void load() }, [load])
-
-  const columns = [
-    {
-      title: '类型',
-      dataIndex: 'kind',
-      width: 90,
-      render: (k: string) => <Tag>{memoryKindLabel(k)}</Tag>,
-    },
-    {
-      title: '内容',
-      dataIndex: 'content',
-      render: (c: string, r: OrgMemory) => (
-        <Space direction="vertical" size={0}>
-          <span>{c}</span>
-          {r.rationale && (
-            <span style={{ fontSize: 12, color: '#999' }}>依据:{r.rationale}</span>
-          )}
-        </Space>
-      ),
-    },
-    {
-      title: '可见范围',
-      dataIndex: 'scopeName',
-      width: 110,
-      render: (n: string, r: OrgMemory) => (
-        <Tag color={r.scopeKind === 'org' ? 'blue' : 'geekblue'}>
-          {r.scopeKind === 'org' ? '全公司' : n}
-        </Tag>
-      ),
-    },
-    {
-      title: '命中次数',
-      dataIndex: 'hitCount',
-      width: 100,
-      sorter: (a: OrgMemory, b: OrgMemory) => a.hitCount - b.hitCount,
-      render: (n: number) => (
-        <Tooltip title="被答案实际引用的次数。长期为 0 说明这条可能没什么用">
-          {n}
-        </Tooltip>
-      ),
-    },
-    {
-      title: '有效期',
-      dataIndex: 'validUntil',
-      width: 130,
-      render: (v: number | null) => {
-        if (!v) return <span style={{ color: '#bbb' }}>长期</span>
-        return v < Date.now() ? <Tag color="warning">已过期</Tag> : fmtTime(v)
-      },
-    },
-    { title: '提交人', dataIndex: 'authorName', width: 100, render: (n: string | null) => n ?? '—' },
-    ...(editable
-      ? [
-          {
-            title: '操作',
-            width: 130,
-            render: (_: unknown, r: OrgMemory) => (
-              <Space size={4}>
-                <Button size="small" type="link" onClick={() => setEditing(r)}>编辑</Button>
-                <Popconfirm
-                  title="退休这条记忆?"
-                  description="将不再参与检索,但记录保留以便追溯历史答案"
-                  onConfirm={async () => {
-                    await api.retireMemory(r.id)
-                    message.success('已退休')
-                    void load()
-                  }}
-                >
-                  <Button size="small" type="link" danger>退休</Button>
-                </Popconfirm>
-              </Space>
-            ),
-          },
-        ]
-      : []),
-  ]
-
-  return (
-    <>
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 16 }}
-        message="组织记忆来自员工提交并经审核的知识"
-        description="它是被提炼过的短陈述,会直接参与问答。要新增请走「知识审核」——员工在客户端沉淀后提交。"
-      />
-
-      <Space style={{ marginBottom: 16 }} wrap>
-        <Select
-          allowClear
-          placeholder="按类型筛选"
-          style={{ width: 150 }}
-          value={kind}
-          onChange={setKind}
-          options={KINDS.map((k) => ({ value: k, label: memoryKindLabel(k) }))}
-        />
-        <Input.Search
-          placeholder="搜索内容"
-          allowClear
-          style={{ width: 260 }}
-          onSearch={setKeyword}
-        />
-      </Space>
-
-      <Table rowKey="id" loading={loading} columns={columns} dataSource={items} pagination={false} />
-
-      <EditModal
-        memory={editing}
-        onClose={() => setEditing(null)}
-        onDone={() => { setEditing(null); void load() }}
-      />
-    </>
-  )
-}
-
-function EditModal({
-  memory, onClose, onDone,
-}: {
-  memory: OrgMemory | null
-  onClose: () => void
-  onDone: () => void
-}): JSX.Element {
-  const [form] = Form.useForm()
-
-  useEffect(() => {
-    if (!memory) return
-    form.setFieldsValue({
-      content: memory.content,
-      rationale: memory.rationale,
-      confidence: memory.confidence,
-    })
-  }, [memory, form])
-
-  return (
-    <Modal
-      open={!!memory}
-      title="编辑组织记忆"
-      onCancel={onClose}
-      destroyOnClose
-      onOk={async () => {
-        const v = await form.validateFields()
-        await api.patchMemory(memory!.id, v)
-        message.success('已保存')
-        onDone()
-      }}
-    >
-      <Form form={form} layout="vertical">
-        <Form.Item name="content" label="内容" rules={[{ required: true }]}>
-          <Input.TextArea rows={3} maxLength={2000} showCount />
-        </Form.Item>
-        <Form.Item name="rationale" label="依据">
-          <Input.TextArea rows={2} maxLength={2000} />
-        </Form.Item>
-        <Form.Item
-          name="confidence"
-          label="置信度"
-          extra="影响检索排序。不确定的内容调低,避免它压过更可靠的条目"
-        >
-          <InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} />
-        </Form.Item>
-      </Form>
-    </Modal>
-  )
+import type { OrgMemory } from '../types'
+const kinds=['fact','decision','convention','pitfall','howto']
+const localDate=(n:number|null|undefined)=>n?new Date(n-new Date(n).getTimezoneOffset()*60000).toISOString().slice(0,16):''
+export default function Memories(){
+ const [items,setItems]=useState<OrgMemory[]>([]),[total,setTotal]=useState(0),[page,setPage]=useState(1),[loading,setLoading]=useState(false),[kind,setKind]=useState<string>(),[keyword,setKeyword]=useState(''),[status,setStatus]=useState<string>('active'),[editing,setEditing]=useState<OrgMemory|null>(null),[conflicts,setConflicts]=useState<any[]>([]),[resolution,setResolution]=useState<any>(null),[history,setHistory]=useState<any[]|null>(null),[saving,setSaving]=useState(false),[error,setError]=useState('')
+ const [form]=Form.useForm(),[conflictForm]=Form.useForm(),seq=useRef(0)
+ const load=useCallback(async()=>{const n=++seq.current;setLoading(true);setError('');try{const r:any=await client.get('/api/v1/memories',{params:{kind,q:keyword||undefined,status,page,size:20}});if(n===seq.current){setItems(r.items);setTotal(r.total)}}catch{setError('经验加载失败，请重试')}finally{if(n===seq.current)setLoading(false)}},[kind,keyword,status,page])
+ useEffect(()=>{void load();return()=>{seq.current++}},[load])
+ const loadConflicts=async()=>{try{setConflicts(await ops.getConflicts())}catch{}}
+ useEffect(()=>{void loadConflicts()},[])
+ const edit=(m:OrgMemory)=>{setEditing(m);form.setFieldsValue({...m,validUntil:localDate(m.validUntil),validFrom:localDate(m.validFrom),evidence:m.evidence??[]})}
+ return <Space direction="vertical" size={16} style={{width:'100%'}}>{error&&<Alert type="error" message={error} action={<Button onClick={()=>void load()}>重试</Button>}/>}<Tabs items={[{key:'library',label:'经验库',children:<><div className="echo-section-top"><Space wrap><Select allowClear placeholder="全部类型" style={{width:140}} value={kind} onChange={v=>{setKind(v);setPage(1)}} options={kinds.map(value=>({value,label:memoryKindLabel(value)}))}/><Select value={status} onChange={v=>{setStatus(v);setPage(1)}} style={{width:140}} options={[{value:'active',label:'有效'},{value:'retired',label:'已退休'},{value:'superseded',label:'已替代'}]}/><Input.Search allowClear placeholder="搜索经验内容" style={{width:240}} onSearch={v=>{setKeyword(v);setPage(1)}}/></Space><Button onClick={()=>void load()}>刷新</Button></div><Table style={{marginTop:16}} scroll={{x:800}} rowKey="id" loading={loading} dataSource={items} pagination={{current:page,pageSize:20,total,onChange:setPage,showSizeChanger:false}} columns={[{title:'类型',dataIndex:'kind',width:90,render:(v:string)=><Tag>{memoryKindLabel(v)}</Tag>},{title:'内容',render:(_:unknown,m:OrgMemory)=><Space direction="vertical" size={4}><Button type="link" style={{whiteSpace:'normal',textAlign:'left',padding:0,height:'auto'}} onClick={()=>edit(m)}>{m.content}</Button><small className="echo-muted">{m.rationale??'尚未填写依据'}</small></Space>},{title:'可见范围',dataIndex:'scopeName',width:110},{title:'可信状态',dataIndex:'trust',width:110,render:(v:string)=><Tag color={v==='verified'?'success':v==='reviewed'?'blue':'default'}>{({reported:'待验证',reviewed:'已审核',verified:'已验证'} as any)[v]??'待验证'}</Tag>},{title:'有效期',dataIndex:'validUntil',render:(v:number)=>v&&v<Date.now()?<Tag color="warning">到期待复核</Tag>:v?fmtTime(v):'长期',width:140},{title:'引用次数',dataIndex:'hitCount',width:90},{title:'',width:130,fixed:'right',render:(_:unknown,m:OrgMemory)=><Space><Button type="link" onClick={()=>edit(m)}>详情</Button>{m.status==='active'&&<Popconfirm title="退休此经验？" description="后续检索将不再使用，保留历史引用。" onConfirm={async()=>{try{await api.retireMemory(m.id);void load()}catch{}}}><Button type="link" danger>退休</Button></Popconfirm>}</Space>}]} /></>},{key:'conflicts',label:`矛盾处理 (${conflicts.filter(x=>!x.resolution).length})`,children:<><Button onClick={()=>void loadConflicts()}>刷新</Button><Table rowKey="id" dataSource={conflicts} columns={[{title:'经验 A',dataIndex:'aContent'},{title:'经验 B',dataIndex:'bContent'},{title:'原因',dataIndex:'reason'},{title:'处理',render:(_:unknown,c:any)=>c.resolution?<Tag>已处理</Tag>:<Button type="primary" onClick={()=>{conflictForm.resetFields();setResolution(c)}}>裁决</Button>}]}/></>}]} />
+ <Drawer title="经验详情与维护" open={!!editing} onClose={()=>setEditing(null)} width={640}><Form form={form} layout="vertical" onFinish={async v=>{setSaving(true);try{await api.patchMemory(editing!.id,{...v,ifUnmodifiedSince:editing!.updatedAt,validUntil:v.validUntil?new Date(v.validUntil).getTime():null,validFrom:v.validFrom?new Date(v.validFrom).getTime():null});message.success('已保存并保留历史版本');setEditing(null);void load()}catch{}finally{setSaving(false)}}}><Form.Item name="kind" label="类型"><Select options={kinds.map(value=>({value,label:memoryKindLabel(value)}))}/></Form.Item><Form.Item name="content" label="经验内容" rules={[{required:true}]}><Input.TextArea rows={4} maxLength={2000} showCount/></Form.Item><Form.Item name="rationale" label="依据与适用条件"><Input.TextArea rows={3}/></Form.Item><Space align="start"><Form.Item name="trust" label="可信状态"><Select style={{width:160}} options={[{value:'reported',label:'待验证'},{value:'reviewed',label:'已审核'},{value:'verified',label:'已验证'}]}/></Form.Item><Form.Item name="confidence" label="置信度"><InputNumber min={0} max={1} step={0.05}/></Form.Item></Space><Space align="start"><Form.Item name="validFrom" label="生效时间"><Input type="datetime-local"/></Form.Item><Form.Item name="validUntil" label="到期复核时间"><Input type="datetime-local"/></Form.Item></Space><Form.Item name="outcome" label="实践结果"><Input.TextArea rows={2}/></Form.Item><Form.Item name="sourceTaskId" label="来源任务 ID"><Input/></Form.Item><Form.List name="evidence">{(fields,{add,remove})=><Card size="small" title="来源证据" extra={<Button onClick={()=>add({type:'doc'})}>添加证据</Button>}>{fields.map(field=><div key={field.key}><Space align="start"><Form.Item name={[field.name,'type']}><Select style={{width:100}} options={[{value:'doc',label:'文档'},{value:'task',label:'任务'},{value:'qa',label:'问答'},{value:'meeting',label:'会议'},{value:'memory',label:'经验'}]}/></Form.Item><Form.Item name={[field.name,'id']} rules={[{required:true}]}><Input placeholder="来源记录 ID"/></Form.Item><Button type="text" danger onClick={()=>remove(field.name)}>移除</Button></Space><Form.Item name={[field.name,'loc']}><Input placeholder="位置 / 章节 / 页码"/></Form.Item></div>)}</Card>}</Form.List><Space style={{marginTop:20}}><Button type="primary" htmlType="submit" loading={saving}>保存经验</Button><Button onClick={()=>void ops.getMemoryVersions(editing!.id).then(setHistory).catch(()=>{})}>变更历史</Button></Space></Form></Drawer>
+ <Modal open={!!resolution} title="裁决经验矛盾" onCancel={()=>setResolution(null)} confirmLoading={saving} onOk={()=>conflictForm.submit()}><Alert showIcon type="warning" message="裁决会影响后续问答，请核对双方适用范围和证据。"/><p>A：{resolution?.aContent}</p><p>B：{resolution?.bContent}</p><Form form={conflictForm} layout="vertical" onFinish={async v=>{setSaving(true);try{await ops.resolveConflict(resolution.id,v);setResolution(null);void loadConflicts();void load();message.success('矛盾已处理')}catch{}finally{setSaving(false)}}}><Form.Item name="resolution" label="处理方式" rules={[{required:true}]}><Select options={[{value:'keep_a',label:'保留 A，退休 B'},{value:'keep_b',label:'保留 B，退休 A'},{value:'merge',label:'合并为新经验'},{value:'both_ok',label:'适用条件不同，两者保留'}]}/></Form.Item><Form.Item noStyle shouldUpdate>{()=>conflictForm.getFieldValue('resolution')==='merge'&&<Form.Item name="mergedContent" label="合并后内容" rules={[{required:true}]}><Input.TextArea rows={4}/></Form.Item>}</Form.Item><Form.Item name="note" label="裁决依据" rules={[{required:true}]}><Input.TextArea/></Form.Item></Form></Modal>
+ <Drawer title="经验变更历史" open={!!history} onClose={()=>setHistory(null)} width={540}><Table rowKey="id" dataSource={history??[]} pagination={{pageSize:10}} columns={[{title:'变更时间',dataIndex:'createdAt',render:fmtTime},{title:'变更前内容',render:(_:unknown,v:any)=>JSON.parse(v.snapshot).content}]} expandable={{expandedRowRender:(v:any)=>{const x=JSON.parse(v.snapshot);return <Space direction="vertical"><p>依据：{x.rationale??'—'}</p><p>可信状态：{x.trust}</p><p>有效期：{fmtTime(x.validUntil)}</p></Space>}}}/></Drawer>
+ </Space>
 }

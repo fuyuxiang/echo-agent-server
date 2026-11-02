@@ -6,6 +6,7 @@ import {
   issueRefreshToken,
   consumeRefreshToken,
   revokeDeviceTokens,
+  requireAdmin,
   type JwtClaims,
   type AuthedRequest
 } from '../auth/jwt.js'
@@ -21,6 +22,8 @@ const LoginSchema = z.object({
 const RefreshSchema = z.object({ refreshToken: z.string().min(1) })
 
 const REFRESH_COOKIE = 'echo_refresh'
+const ADMIN_REFRESH_COOKIE = 'echo_admin_refresh'
+const ADMIN_DEVICE = 'admin-web'
 
 function cookieValue(header: string | undefined, name: string): string | undefined {
   for (const part of (header ?? '').split(';')) {
@@ -40,23 +43,25 @@ function setRefreshCookie(
   reply: import('fastify').FastifyReply,
   token: string,
   maxAgeMs: number,
-  secureCookies: boolean
+  secureCookies: boolean,
+  adminConsole = false
 ): void {
   const secure = secureCookies ? '; Secure' : ''
   reply.header(
     'set-cookie',
-    `${REFRESH_COOKIE}=${encodeURIComponent(token)}; Path=/api/v1/auth; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(maxAgeMs / 1000)}${secure}`
+    `${adminConsole ? ADMIN_REFRESH_COOKIE : REFRESH_COOKIE}=${encodeURIComponent(token)}; Path=${adminConsole ? '/api/v1/admin/auth' : '/api/v1/auth'}; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(maxAgeMs / 1000)}${secure}`
   )
 }
 
 function clearRefreshCookie(
   reply: import('fastify').FastifyReply,
-  secureCookies: boolean
+  secureCookies: boolean,
+  adminConsole = false
 ): void {
   const secure = secureCookies ? '; Secure' : ''
   reply.header(
     'set-cookie',
-    `${REFRESH_COOKIE}=; Path=/api/v1/auth; HttpOnly; SameSite=Strict; Max-Age=0${secure}`
+    `${adminConsole ? ADMIN_REFRESH_COOKIE : REFRESH_COOKIE}=; Path=${adminConsole ? '/api/v1/admin/auth' : '/api/v1/auth'}; HttpOnly; SameSite=Strict; Max-Age=0${secure}`
   )
 }
 
@@ -79,8 +84,9 @@ export function registerAuthRoutes(app: FastifyInstance): void {
 
   // 登录限流:方案 5.6 要求 5/min。Fastify 路由级 config.rateLimit 覆盖
   // 全局默认。匿名请求按 IP + username 联合 key。
+  for (const url of ['/api/v1/auth/login', '/api/v1/admin/auth/login']) {
   app.post(
-    '/api/v1/auth/login',
+    url,
     {
       config: {
         rateLimit: {
@@ -94,7 +100,10 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     async (req, reply) => {
     const parsed = LoginSchema.safeParse(req.body ?? {})
     if (!parsed.success) return reply.code(400).send(fail(4001, '缺少用户名或密码'))
-    const { username, password, deviceId } = parsed.data
+    const { username, password } = parsed.data
+    const adminEndpoint = url === '/api/v1/admin/auth/login'
+    const deviceId = adminEndpoint ? ADMIN_DEVICE : parsed.data.deviceId
+    const adminConsole = adminEndpoint || deviceId === ADMIN_DEVICE
 
     // 按 IP + 用户名双维度限流:只按用户名会让攻击者用一个不存在的账号
     // 把真实用户锁死,只按 IP 则挡不住分布式撞库里的单账号爆破。
@@ -122,6 +131,12 @@ export function registerAuthRoutes(app: FastifyInstance): void {
       return reply.code(401).send(fail(4012, '用户名或密码错误'))
     }
 
+    // 管理控制台与桌面端使用不同的登录入口；旧版 admin-web 请求同样收紧。
+    if (adminConsole && row.role !== 'admin') {
+      app.audit(null, 'login_failed', username, { ip: req.ip, adminConsole: true, reason: 'admin_required' })
+      return reply.code(403).send(fail(4033, '管理后台仅限管理员登录，请使用 Echo Agent 桌面端'))
+    }
+
     throttle.recordSuccess(key)
     touchLastSeen(db, row.id)
 
@@ -129,13 +144,14 @@ export function registerAuthRoutes(app: FastifyInstance): void {
       sub: row.id,
       role: row.role,
       tv: row.tokenVersion,
-      device: deviceId
+      device: deviceId,
+      ...(adminConsole ? { aud: 'admin-console' as const } : {})
     }
     const accessToken = app.jwt.sign(claims, { expiresIn: cfg.accessTokenTtl })
     // 同设备重复登录先撤旧 refresh token,避免一台设备累积多条记录。
     revokeDeviceTokens(db, row.id, deviceId)
     const refreshToken = issueRefreshToken(db, row.id, deviceId, cfg.refreshTokenTtlMs)
-    setRefreshCookie(reply, refreshToken, cfg.refreshTokenTtlMs, secureCookies)
+    setRefreshCookie(reply, refreshToken, cfg.refreshTokenTtlMs, secureCookies, adminEndpoint)
 
     app.audit(null, 'login', row.id, { ip: req.ip, deviceId })
     return reply.send(
@@ -143,31 +159,41 @@ export function registerAuthRoutes(app: FastifyInstance): void {
     )
     }
   )
+  }
 
-  app.post('/api/v1/auth/refresh', async (req, reply) => {
+  for (const url of ['/api/v1/auth/refresh', '/api/v1/admin/auth/refresh']) {
+  app.post(url, async (req, reply) => {
+    const adminEndpoint = url === '/api/v1/admin/auth/refresh'
     const parsed = RefreshSchema.partial().safeParse(req.body ?? {})
     if (!parsed.success) return reply.code(400).send(fail(4001, 'refreshToken 格式错误'))
     const presentedRefreshToken = parsed.data.refreshToken
-      ?? cookieValue(req.headers.cookie, REFRESH_COOKIE)
+      ?? cookieValue(req.headers.cookie, adminEndpoint ? ADMIN_REFRESH_COOKIE : REFRESH_COOKIE)
     if (!presentedRefreshToken) return reply.code(400).send(fail(4001, '缺少 refreshToken'))
 
-    const rec = consumeRefreshToken(db, presentedRefreshToken)
+    const rec = consumeRefreshToken(db, presentedRefreshToken, adminEndpoint ? ADMIN_DEVICE : undefined)
     if (!rec) {
-      clearRefreshCookie(reply, secureCookies)
+      clearRefreshCookie(reply, secureCookies, adminEndpoint)
       return reply.code(401).send(fail(4015, 'refresh token 无效或已过期'))
     }
 
     const user = findById(db, rec.userId)
     if (!user || user.status !== 'active') {
-      clearRefreshCookie(reply, secureCookies)
+      clearRefreshCookie(reply, secureCookies, adminEndpoint)
       return reply.code(401).send(fail(4013, '账号不存在或已禁用'))
+    }
+
+    const adminConsole = adminEndpoint || rec.deviceId === ADMIN_DEVICE
+    if (adminConsole && (user.role !== 'admin' || rec.deviceId !== ADMIN_DEVICE)) {
+      clearRefreshCookie(reply, secureCookies, adminEndpoint)
+      return reply.code(403).send(fail(4033, '管理后台仅限管理员登录，请使用 Echo Agent 桌面端'))
     }
 
     const claims: JwtClaims = {
       sub: user.id,
       role: user.role,
       tv: user.tokenVersion,
-      device: rec.deviceId
+      device: rec.deviceId,
+      ...(adminConsole ? { aud: 'admin-console' as const } : {})
     }
     const accessToken = app.jwt.sign(claims, { expiresIn: cfg.accessTokenTtl })
     // 轮换:换出新的 refresh token,旧的已在 consume 时删除。
@@ -177,20 +203,26 @@ export function registerAuthRoutes(app: FastifyInstance): void {
       rec.deviceId,
       cfg.refreshTokenTtlMs
     )
-    setRefreshCookie(reply, nextRefreshToken, cfg.refreshTokenTtlMs, secureCookies)
+    setRefreshCookie(reply, nextRefreshToken, cfg.refreshTokenTtlMs, secureCookies, adminEndpoint)
     return reply.send(ok({ accessToken, refreshToken: nextRefreshToken }))
   })
+  }
 
-  app.post('/api/v1/auth/logout', { preHandler: app.authenticate }, async (req, reply) => {
+  for (const url of ['/api/v1/auth/logout', '/api/v1/admin/auth/logout']) {
+  const adminEndpoint = url === '/api/v1/admin/auth/logout'
+  app.post(url, { preHandler: adminEndpoint ? [app.authenticate, requireAdmin] : app.authenticate }, async (req, reply) => {
     const claims = (req as AuthedRequest).claims
     revokeDeviceTokens(db, claims.sub, claims.device ?? 'default')
-    clearRefreshCookie(reply, secureCookies)
+    clearRefreshCookie(reply, secureCookies, adminEndpoint)
     app.audit(req, 'logout', claims.sub)
     return reply.code(200).send(ok({ loggedOut: true }))
   })
+  }
 
-  app.get('/api/v1/me', { preHandler: app.authenticate }, async (req, reply) => {
+  for (const url of ['/api/v1/me', '/api/v1/admin/auth/me']) {
+  app.get(url, { preHandler: url === '/api/v1/admin/auth/me' ? [app.authenticate, requireAdmin] : app.authenticate }, async (req, reply) => {
     const claims = (req as AuthedRequest).claims
     return reply.send(ok(sessionPayload(claims.sub)))
   })
+  }
 }

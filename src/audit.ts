@@ -4,6 +4,13 @@ import type { DB } from './db/index.js'
 import type { AuthedRequest } from './auth/jwt.js'
 
 export type AuditAction =
+  | 'auto_publish'
+  | 'security_scan_failed'
+  | 'security_scan_retry'
+  | 'usage_export'
+  | 'usage_reconcile'
+  | 'maintenance_change'
+  | 'device_receipt'
   | 'login'
   | 'login_failed'
   | 'logout'

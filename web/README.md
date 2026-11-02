@@ -4,7 +4,7 @@ React + TypeScript + Vite + Ant Design 5 的管理后台，对接 echo-agent-ser
 
 ## 开发
 1. 确保后端已在 :8787 运行（仓库根目录 `./start.sh`）。
-2. `cd web && npm install && npm run dev`，访问 http://localhost:5173 。
+2. `cd web && npm install && npm run dev`，访问 http://localhost:9980 。
    dev server 通过代理将 `/api` 转发到 :8787。
 
 ## 构建
@@ -16,13 +16,21 @@ React + TypeScript + Vite + Ant Design 5 的管理后台，对接 echo-agent-ser
 ## 测试
 `npm run test`（Vitest + React Testing Library）。
 
-## 说明
-- 登录态来自登录时签发的 JWT（含 role/groupId 快照，有效期 7 天）。管理员修改某用户的角色或分组后，该用户需重新登录才会生效（菜单与记忆访问按 token 内的快照判断）。
+## 界面风格
 
+管理后台对齐同级 `echo-agent-desktop/src/styles/tokens.css` 的浅色主题：浅灰绿侧栏、近白内容区、深绿文字和薄荷绿主要操作。
 
-## 功能
-- 登录鉴权（JWT）
-- 用户管理：列表、新建、改分组、启用/禁用（仅 admin）
-- 分组管理：列表、新建（仅 admin）
-- 模型配置：查看/修改，凭证不回显（仅 admin 可改）
-- 记忆查看：列表、向量检索、删除（按分组隔离）
+- `src/theme.ts` 集中维护配色、字体和 Ant Design 组件主题，并向全局注入 `--echo-*` CSS 变量。
+- `src/styles.css` 维护后台框架、登录页及响应式布局；页面中的辅助文字与状态颜色使用同一组变量。
+- `src/components/EchoBrand.tsx` 统一产品字标；`AppLayout.tsx` 统一页面标题、导航和账号入口。
+
+前端构建产物位于 `web/dist/`，由服务端同源托管。部署时需同步新的构建产物；Docker 部署需重新构建应用镜像。
+
+## 访问与功能
+
+- Web 后台只允许管理员登录；知识维护人和成员使用桌面端。
+- `/api/v1/admin/auth/*` 提供独立的后台登录与 Cookie 续期，页面加载时向服务器校验管理员身份；停用或降权即时失效。
+- 管理概览汇总安全检查、失败任务、用量核对与知识维护待办；不提供“我的提交”或个人通知入口。
+- 知识质量包含质量分析和维护任务，避免重复导航；旧页面地址会跳转到对应管理页。
+- 管理用户、分组与客户端，查看文档/经验/技能的自动安全检查结果，配置上游、用户密钥与配额，统计全组织用量，执行审计、检索自测和完整备份。
+- 客户端登录与数据接口继续保留，成员的桌面端功能不受后台访问限制影响。

@@ -1,3 +1,4 @@
+import { usageContext } from '../gateway/usage.js'
 import { randomUUID, createHash, timingSafeEqual } from 'node:crypto'
 import type { FastifyReply, FastifyRequest } from 'fastify'
 import type { DB } from '../db/index.js'
@@ -16,6 +17,7 @@ export interface JwtClaims {
   /** 与 users.token_version 比对。不一致即拒 —— 改密码/禁用可立即撤销全部 token。 */
   tv: number
   device?: string
+  aud?: 'admin-console'
 }
 
 export interface AuthedRequest extends FastifyRequest {
@@ -55,6 +57,12 @@ export function makeAuthenticate(db: DB) {
       return reply.code(401).send(fail(4014, '登录状态已失效,请重新登录'))
     }
 
+    if ((claims.aud === 'admin-console' || claims.device === 'admin-web') && row.role !== 'admin') {
+      return reply.code(403).send(fail(4033, '管理员权限已失效，请重新登录'))
+    }
+
+    const usage = usageContext.getStore()
+    if (usage) { usage.userId = claims.sub; usage.deviceId = claims.device }
     // 角色以库为准,不信 token —— 管理员降权后旧 token 不应保留权限。
     ;(req as AuthedRequest).claims = { ...claims, role: row.role as JwtClaims['role'] }
   }
@@ -100,15 +108,16 @@ export function issueRefreshToken(
 
 export function consumeRefreshToken(
   db: DB,
-  token: string
+  token: string,
+  expectedDeviceId?: string
 ): RefreshRecord | null {
   const hash = hashToken(token)
   const row = db
     .prepare(
       `SELECT user_id AS userId, device_id AS deviceId, expires_at AS expiresAt
-         FROM refresh_tokens WHERE token_hash = ?`
+         FROM refresh_tokens WHERE token_hash = ? ${expectedDeviceId ? 'AND device_id = ?' : ''}`
     )
-    .get(hash) as { userId: string; deviceId: string; expiresAt: number } | undefined
+    .get(hash, ...(expectedDeviceId ? [expectedDeviceId] : [])) as { userId: string; deviceId: string; expiresAt: number } | undefined
 
   if (!row) return null
 
@@ -121,12 +130,14 @@ export function consumeRefreshToken(
 }
 
 export function revokeDeviceTokens(db: DB, userId: string, deviceId: string): void {
+  db.prepare('UPDATE api_keys SET revoked_at=? WHERE user_id=? AND device_id=? AND revoked_at IS NULL').run(Date.now(), userId, deviceId)
   db.prepare(
     'DELETE FROM refresh_tokens WHERE user_id = ? AND device_id = ?'
   ).run(userId, deviceId)
 }
 
 export function revokeAllUserTokens(db: DB, userId: string): void {
+  db.prepare('UPDATE api_keys SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL').run(Date.now(), userId)
   db.prepare('DELETE FROM refresh_tokens WHERE user_id = ?').run(userId)
   // 同时递增 token_version,让已签发的 access token 立即失效。
   db.prepare(

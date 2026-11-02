@@ -65,7 +65,7 @@ describe('鉴权', () => {
     const loginRes = await app.inject({
       method: 'POST',
       url: '/api/v1/auth/login',
-      payload: { username: 'alice', password: 'alice-password', deviceId: 'admin-web' }
+      payload: { username: 'admin', password: 'admin-password', deviceId: 'admin-web' }
     })
     const cookie = String(loginRes.headers['set-cookie']).split(';')[0]
     const refreshed = await app.inject({
@@ -391,7 +391,7 @@ describe('模型配置', () => {
     expect(res.json().data.proxied).toBe(true)
   })
 
-  it('登录成员可以从桌面端同步入口下载完整聊天模型配置', async () => {
+  it('登录成员同步服务器网关地址和独立密钥', async () => {
     const admin = await login(app, 'admin', 'admin-password')
     const put = await app.inject({
       method: 'PUT',
@@ -420,8 +420,8 @@ describe('模型配置', () => {
       configured: true,
       chatProvider: 'openai-compatible',
       chatModel: 'glm-5',
-      chatBaseUrl: 'https://llm.example/v1',
-      chatKey: 'sk-client-download',
+      chatBaseUrl: 'http://localhost:80/api/v1/llm/v1',
+      chatKey: expect.stringMatching(/^[A-F0-9]{32}$/),
       credentialError: false,
       source: 'database'
     })

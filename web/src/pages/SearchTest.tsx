@@ -40,16 +40,16 @@ export default function SearchTest() {
         description="结果与你的可见范围和密级一致,不代表其他员工能看到同样的内容。"
       />
 
-      <Space>
+      <Space wrap>
         <Input.Search
           placeholder="输入一个员工可能会问的问题"
-          style={{ width: 480 }}
+          className="echo-search-input"
           enterButton="检索"
           size="large"
           onSearch={search}
         />
         <Space>
-          <Switch checked={multiHop} onChange={setMultiHop} />
+          <Switch aria-label="多跳检索" checked={multiHop} onChange={setMultiHop} />
           <span style={{ fontSize: 13 }}>多跳检索</span>
         </Space>
       </Space>
@@ -65,7 +65,7 @@ export default function SearchTest() {
               <Descriptions.Item label="融合候选">{result.diagnostics.fusedCandidates} 条</Descriptions.Item>
               <Descriptions.Item label="精排耗时">{result.diagnostics.rerankMs} ms</Descriptions.Item>
               <Descriptions.Item label="总耗时">
-                <span style={{ color: result.diagnostics.totalMs > 800 ? '#cf1322' : undefined }}>
+                <span style={{ color: result.diagnostics.totalMs > 800 ? 'var(--echo-error)' : undefined }}>
                   {result.diagnostics.totalMs} ms
                 </span>
               </Descriptions.Item>
@@ -107,7 +107,7 @@ export default function SearchTest() {
                 <Space direction="vertical">
                   <span>没有检索到相关内容 —— 这种情况下客户端会明确回答"没找到",而不是编答案</span>
                   {result.suggestAsk?.length ? (
-                    <span style={{ fontSize: 13, color: '#888' }}>
+                    <span style={{ fontSize: 13, color: 'var(--echo-text-muted)' }}>
                       建议询问:{result.suggestAsk.map((p) => p.displayName).join('、')}
                     </span>
                   ) : null}
@@ -129,7 +129,7 @@ export default function SearchTest() {
                       <span>{c.docTitle}</span>
                       {c.citation.page != null && <Tag>第 {c.citation.page} 页</Tag>}
                       {c.citation.heading && (
-                        <span style={{ fontSize: 12, color: '#999', fontWeight: 400 }}>
+                        <span style={{ fontSize: 12, color: 'var(--echo-text-muted)', fontWeight: 400 }}>
                           {c.citation.heading}
                         </span>
                       )}
@@ -141,7 +141,7 @@ export default function SearchTest() {
                       <Tag color={c.scopeKind === 'org' ? 'blue' : 'geekblue'}>
                         {c.scopeKind === 'org' ? '全公司' : '团队'}
                       </Tag>
-                      <span style={{ fontSize: 12, color: '#999' }}>
+                      <span style={{ fontSize: 12, color: 'var(--echo-text-muted)' }}>
                         {c.score.toFixed(3)}
                       </span>
                     </Space>
@@ -149,7 +149,7 @@ export default function SearchTest() {
                 >
                   <div style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>{c.text}</div>
                   {c.owner && (
-                    <div style={{ fontSize: 12, color: '#999', marginTop: 6 }}>
+                    <div style={{ fontSize: 12, color: 'var(--echo-text-muted)', marginTop: 6 }}>
                       维护人:{c.owner.displayName}
                     </div>
                   )}

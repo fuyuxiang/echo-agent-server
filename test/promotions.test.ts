@@ -11,10 +11,10 @@ import { ensureOrgScope } from '../src/server.js'
 import { drain } from '../src/kb/ingest/worker.js'
 import { createEmbedder } from '../src/models/embedder.js'
 
-// 审核流是"知识双向流动"的落点。核心断言:
-//   · 提交本身不写知识库(未通过前查不到);
+// 自动安全检查是共享发布的落点。
+//   · 安全检查通过即发布，无需人工审批；
 //   · 通过后当天可检索(闭环真的闭上了);
-//   · 审核人能改后再通过(否则要么降标准,要么让人反复返工)。
+//   · 发布后的内容可由管理员维护。
 
 let storageDir: string
 let cfg: ReturnType<typeof testConfig>
@@ -72,7 +72,7 @@ afterEach(() => {
 })
 
 describe('提交', () => {
-  it('提交记忆进入待审核队列', async () => {
+  it('提交记忆安全检查后自动发布', async () => {
     const { app, orgScope } = await setup()
     const token = await login(app, 'alice', 'alice-password')
     const res = await app.inject({
@@ -82,11 +82,11 @@ describe('提交', () => {
       payload: { payloadType: 'memory', payload: memoryPayload, source: 'qa', targetScope: orgScope }
     })
     expect(res.statusCode).toBe(200)
-    expect(res.json().data.state).toBe('pending')
+    expect(res.json().data.state).toBe('approved')
   })
 
   // 关键约束:提交不等于生效。未审核的内容绝不能被检索到。
-  it('待审核内容不可检索', async () => {
+  it('自动发布后立即可检索', async () => {
     const { app, orgScope } = await setup()
     const token = await login(app, 'alice', 'alice-password')
     await app.inject({
@@ -101,7 +101,7 @@ describe('提交', () => {
       headers: bearer(token),
       payload: { query: '报销单签字' }
     })
-    expect(res.json().data.memories).toHaveLength(0)
+    expect(res.json().data.memories).toHaveLength(1)
   })
 
   it('不能向无权访问的范围提交', async () => {
@@ -149,7 +149,7 @@ describe('提交', () => {
     })
     const items = res.json().data
     expect(items).toHaveLength(1)
-    expect(items[0].state).toBe('pending')
+    expect(items[0].state).toBe('approved')
     // payload 已解析成对象,前端不必再 JSON.parse
     expect(items[0].payload.content).toContain('报销单')
   })
@@ -211,30 +211,13 @@ describe('审核', () => {
   })
 
   // 审核人能顺手改一句,是组织层质量的关键闸门。
-  it('审核人可修订后通过,落库的是修订版', async () => {
-    const ctx = await setup()
-    const aliceToken = await login(ctx.app, 'alice', 'alice-password')
-    const adminToken = await login(ctx.app, 'admin', 'admin-password')
-    const id = await submit(ctx, aliceToken, ctx.orgScope)
-
-    await ctx.app.inject({
-      method: 'POST',
-      url: `/api/v1/promotions/${id}/approve`,
-      headers: bearer(adminToken),
-      payload: {
-        note: '措辞已调整',
-        edits: { content: '报销单须经直属上级签字,并在费用发生后三十日内交财务。' }
-      }
-    })
-
-    const mem = ctx.db
-      .prepare("SELECT content FROM org_memories WHERE content LIKE '%三十日%'")
-      .get() as { content: string } | undefined
-    expect(mem).toBeTruthy()
-    const original = ctx.db
-      .prepare("SELECT content FROM org_memories WHERE content = ?")
-      .get(memoryPayload.content)
-    expect(original).toBeUndefined()
+  it('自动发布后管理员可直接维护内容，无须再审批', async () => {
+    const ctx=await setup(), token=await login(ctx.app,'alice','alice-password'), admin=await login(ctx.app,'admin','admin-password')
+    const id=await submit(ctx,token,ctx.orgScope)
+    const result=(ctx.db.prepare('SELECT result_id AS id FROM promotions WHERE id=?').get(id) as any).id
+    const updated=await ctx.app.inject({method:'PATCH',url:`/api/v1/memories/${result}`,headers:bearer(admin),payload:{content:'报销须在费用发生后三十日内交财务。'}})
+    expect(updated.statusCode).toBe(200)
+    expect((ctx.db.prepare('SELECT content FROM org_memories WHERE id=?').get(result) as any).content).toContain('三十日')
   })
 
   it('修订后内容非法则拒绝通过', async () => {
@@ -279,7 +262,7 @@ describe('审核', () => {
     expect(found.json().data.chunks.length).toBeGreaterThan(0)
   })
 
-  it('驳回必须给出原因', async () => {
+  it('旧驳回接口不能操作已经自动发布的内容', async () => {
     const ctx = await setup()
     const aliceToken = await login(ctx.app, 'alice', 'alice-password')
     const adminToken = await login(ctx.app, 'admin', 'admin-password')
@@ -299,25 +282,17 @@ describe('审核', () => {
       headers: bearer(adminToken),
       payload: { note: '与现行制度冲突' }
     })
-    expect(withNote.statusCode).toBe(200)
+    expect(withNote.statusCode).toBe(409)
   })
 
-  it('驳回后内容不入库', async () => {
-    const ctx = await setup()
-    const aliceToken = await login(ctx.app, 'alice', 'alice-password')
-    const adminToken = await login(ctx.app, 'admin', 'admin-password')
-    const id = await submit(ctx, aliceToken, ctx.orgScope)
-    await ctx.app.inject({
-      method: 'POST',
-      url: `/api/v1/promotions/${id}/reject`,
-      headers: bearer(adminToken),
-      payload: { note: '不准确' }
-    })
-    const n = ctx.db.prepare('SELECT COUNT(*) AS n FROM org_memories').get() as { n: number }
-    expect(n.n).toBe(0)
+  it('有危险脚本的内容自动拦截，不能进入知识库', async () => {
+    const ctx=await setup(), token=await login(ctx.app,'alice','alice-password')
+    const response=await ctx.app.inject({method:'POST',url:'/api/v1/promotions',headers:bearer(token),payload:{payloadType:'memory',payload:{...memoryPayload,content:'<script>run()</script>'},source:'manual',targetScope:ctx.orgScope}})
+    expect(response.statusCode).toBe(422)
+    expect((ctx.db.prepare('SELECT COUNT(*) AS n FROM org_memories').get() as any).n).toBe(0)
   })
 
-  it('同一条不能重复处理', async () => {
+  it('兼容入口重复请求不会重复发布', async () => {
     const ctx = await setup()
     const aliceToken = await login(ctx.app, 'alice', 'alice-password')
     const adminToken = await login(ctx.app, 'admin', 'admin-password')
@@ -333,7 +308,8 @@ describe('审核', () => {
       url: `/api/v1/promotions/${id}/approve`,
       headers: bearer(adminToken)
     })
-    expect(again.statusCode).toBe(409)
+    expect(again.statusCode).toBe(200)
+    expect((ctx.db.prepare('SELECT COUNT(*) AS n FROM org_memories').get() as any).n).toBe(1)
   })
 
   it('curator 不能审核无权范围的提交', async () => {
@@ -351,16 +327,12 @@ describe('审核', () => {
     expect(res.statusCode).toBe(403)
   })
 
-  it('提交人可自行撤回', async () => {
-    const ctx = await setup()
-    const aliceToken = await login(ctx.app, 'alice', 'alice-password')
-    const id = await submit(ctx, aliceToken, ctx.orgScope)
-    const res = await ctx.app.inject({
-      method: 'POST',
-      url: `/api/v1/promotions/${id}/withdraw`,
-      headers: bearer(aliceToken)
-    })
-    expect(res.statusCode).toBe(200)
+  it('已发布内容不能通过旧待审批撤回接口删除', async () => {
+    const ctx=await setup(), token=await login(ctx.app,'alice','alice-password')
+    const id=await submit(ctx,token,ctx.orgScope)
+    const response=await ctx.app.inject({method:'POST',url:`/api/v1/promotions/${id}/withdraw`,headers:bearer(token)})
+    expect(response.statusCode).toBe(404)
+    expect((ctx.db.prepare('SELECT COUNT(*) AS n FROM org_memories').get() as any).n).toBe(1)
   })
 
   it('不能撤回他人的提交', async () => {

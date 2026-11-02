@@ -1,3 +1,4 @@
+import { AutomaticPublicationWorker } from './operations/automatic-publication.js'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { openDb, migrate, pendingMigrations, type DB } from './db/index.js'
@@ -115,6 +116,8 @@ export async function start(): Promise<void> {
     }
   })
   worker.start()
+  const publicationWorker = new AutomaticPublicationWorker(app)
+  publicationWorker.start()
 
   const backupScheduler = new DatabaseBackupScheduler(db, cfg, {
     info: (m) => console.log(`[echo-server] ${m}`),
@@ -130,6 +133,7 @@ export async function start(): Promise<void> {
     // eslint-disable-next-line no-console
     console.log(`[echo-server] 收到 ${sig},正在退出`)
     worker.stop()
+    await publicationWorker.stop()
     await backupScheduler.stop()
     await app.close()
     db.close()

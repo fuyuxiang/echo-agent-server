@@ -1,3 +1,4 @@
+import { meteredFetch, settings, usageContext } from '../gateway/usage.js'
 import { z } from 'zod'
 import type { Config } from '../config.js'
 import type { DB } from '../db/index.js'
@@ -24,6 +25,7 @@ export async function callStructuredChat<T>(
   cfg: Config,
   request: StructuredChatRequest<T>
 ): Promise<T | null> {
+  if(!usageContext.getStore())return usageContext.run({db,cfg},()=>callStructuredChat(db,cfg,request))
   const chat = resolveChatConfig(db, cfg)
   if (!chat.configured || !chat.key || !chat.model) return null
 
@@ -34,7 +36,7 @@ export async function callStructuredChat<T>(
   const timer = setTimeout(() => ctrl.abort(), request.timeoutMs ?? cfg.agenticReasoningTimeoutMs)
 
   try {
-    const response = await fetch(`${chat.baseUrl}/chat/completions`, {
+    const response = await meteredFetch(`${chat.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -44,14 +46,15 @@ export async function callStructuredChat<T>(
       body: JSON.stringify({
         model: chat.model,
         temperature: 0,
+        max_tokens:settings(db).max_output_tokens,
         stream: false,
         messages: [
           { role: 'system', content: request.system },
           { role: 'user', content: request.user }
         ]
       })
-    })
-    if (!response.ok) return null
+    }, {source:'knowledge_reasoning',model:chat.model})
+    if (!response.ok) {await response.body?.cancel();return null}
     const json = await response.json() as {
       choices?: Array<{ message?: { content?: string | null } }>
     }

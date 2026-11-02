@@ -1,3 +1,4 @@
+import { usageContext } from './gateway/usage.js'
 import { randomUUID } from 'node:crypto'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -468,6 +469,7 @@ async function requireAuth(
     return null
   }
   // 角色以库为准,避免 token 携带过期角色。
+  const usage=usageContext.getStore();if(usage){usage.userId=claims.sub;usage.deviceId=claims.device}
   const finalClaims: JwtClaims = { ...claims, role: row.role as JwtClaims['role'] }
   return { userId: claims.sub, claims: finalClaims }
 }

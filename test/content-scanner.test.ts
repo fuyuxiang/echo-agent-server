@@ -83,4 +83,13 @@ describe('发布前技术扫描', () => {
         error ? reject(error) : resolve()))
     }
   })
+  it('checks large text entries and compressed virus signatures rather than skipping them',async()=>{
+    const zip=new JSZip()
+    zip.file('large.md','x'.repeat(2*1024*1024+1)+'\nrm -rf /')
+    zip.file('virus.txt','X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*')
+    const report=await scanSkillPackage(await zip.generateAsync({type:'nodebuffer',compression:'DEFLATE'}),cfg)
+    expect(report.status).toBe('failed')
+    expect(report.findings.map(f=>f.code)).toEqual(expect.arrayContaining(['SKILL_DANGEROUS_COMMAND','EICAR_TEST_SIGNATURE']))
+  })
+
 })

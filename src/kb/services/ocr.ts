@@ -1,3 +1,4 @@
+import { meteredFetch } from '../../gateway/usage.js'
 import type { Config } from '../../config.js'
 import type { VlmClient } from './vlm.js'
 
@@ -43,12 +44,12 @@ export function createOcrClient(cfg?: Config, warn?: (m: string) => void, vlm?: 
     extractFromImage: async (buf: Buffer): Promise<string> => {
       const form = new FormData()
       form.append('file', new Blob([new Uint8Array(buf)]), 'page.png')
-      const res = await fetch(url, {
+      const res = await meteredFetch(url, {
         method: 'POST',
         headers: key ? { authorization: `Bearer ${key}` } : {},
         body: form
-      })
-      if (!res.ok) throw new Error(`ocr API ${res.status}`)
+      }, {source:'ocr',model:'ocr',units:{inputImages:1}})
+      if (!res.ok) {await res.body?.cancel();throw new Error(`ocr API ${res.status}`)}
       const j = (await res.json()) as { text: string }
       return j.text
     }

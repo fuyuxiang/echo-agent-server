@@ -22,6 +22,7 @@ const CreateUserSchema = z.object({
   email: z.string().email().optional(),
   role: z.enum(['admin', 'curator', 'member']).optional(),
   clearance: z.coerce.number().int().min(0).max(2).optional(),
+  departmentId: z.string().nullable().optional(),
   groupIds: z.array(z.string()).optional()
 })
 
@@ -31,6 +32,7 @@ const UpdateUserSchema = z.object({
   role: z.enum(['admin', 'curator', 'member']).optional(),
   status: z.enum(['active', 'disabled']).optional(),
   clearance: z.coerce.number().int().min(0).max(2).optional(),
+  departmentId: z.string().nullable().optional(),
   groupIds: z.array(z.string()).optional()
 })
 
@@ -61,6 +63,7 @@ export function registerAdminRoutes(app: FastifyInstance): void {
       if (!parsed.success) {
         return reply.code(400).send(fail(4001, parsed.error.issues[0]?.message ?? '参数错误'))
       }
+      if([...(parsed.data.groupIds??[]),...(parsed.data.departmentId?[parsed.data.departmentId]:[])].some(id=>!db.prepare('SELECT 1 FROM groups WHERE id=?').get(id)))return reply.code(400).send(fail(4001,'部门或访问分组不存在'))
       try {
         const user = await createUser(db, parsed.data)
         app.audit(req, 'user_change', user.id, { created: true })
@@ -95,6 +98,7 @@ export function registerAdminRoutes(app: FastifyInstance): void {
         }
       }
 
+      if([...(parsed.data.groupIds??[]),...(parsed.data.departmentId?[parsed.data.departmentId]:[])].some(gid=>!db.prepare('SELECT 1 FROM groups WHERE id=?').get(gid)))return reply.code(400).send(fail(4001,'部门或访问分组不存在'))
       const { groupIds, ...fields } = parsed.data
       const updated = updateUser(db, id, fields)
       if (!updated) return reply.code(404).send(fail(4041, '用户不存在'))
@@ -161,6 +165,7 @@ export function registerAdminRoutes(app: FastifyInstance): void {
         return reply.code(400).send(fail(4001, parsed.error.issues[0]?.message ?? '参数错误'))
       }
       const { name, parentId, description } = parsed.data
+      if(parentId&&!db.prepare('SELECT 1 FROM groups WHERE id=?').get(parentId))return reply.code(400).send(fail(4001,'上级分组不存在'))
       const id = randomUUID()
       const scopeId = randomUUID()
 
@@ -188,6 +193,25 @@ export function registerAdminRoutes(app: FastifyInstance): void {
     }
   )
 
+
+  app.patch('/api/v1/admin/groups/:id',{preHandler:[app.authenticate,requireAdmin]},async(req,reply)=>{
+    const p=GroupSchema.safeParse(req.body);if(!p.success)return reply.code(400).send(fail(4001,'分组参数错误'))
+    const {id}=req.params as {id:string}
+    if(!db.prepare('SELECT 1 FROM groups WHERE id=?').get(id))return reply.code(404).send(fail(4041,'分组不存在'))
+    const parent=p.data.parentId??null
+    if(parent && !db.prepare('SELECT 1 FROM groups WHERE id=?').get(parent))return reply.code(400).send(fail(4001,'上级分组不存在'))
+    if(parent===id|| (parent&&db.prepare(`WITH RECURSIVE children(id) AS (SELECT id FROM groups WHERE parent_id=? UNION SELECT g.id FROM groups g JOIN children c ON g.parent_id=c.id) SELECT 1 FROM children WHERE id=?`).get(id,parent)))return reply.code(409).send(fail(4091,'分组层级不能形成循环'))
+    try {db.transaction(()=>{db.prepare('UPDATE groups SET name=?,parent_id=?,description=? WHERE id=?').run(p.data.name,parent,p.data.description??null,id);db.prepare("UPDATE scopes SET name=? WHERE group_id=? AND kind='team'").run(p.data.name,id)})()}catch(e){if(String(e).includes('UNIQUE'))return reply.code(409).send(fail(4091,'分组名称已存在'));throw e}
+    app.audit(req,'user_change',id,{groupUpdated:p.data});return reply.send(ok({updated:true}))
+  })
+  app.delete('/api/v1/admin/groups/:id',{preHandler:[app.authenticate,requireAdmin]},async(req,reply)=>{
+    const {id}=req.params as {id:string}
+    if(!db.prepare('SELECT 1 FROM groups WHERE id=?').get(id))return reply.code(404).send(fail(4041,'分组不存在'))
+    const refs=db.prepare(`SELECT (SELECT COUNT(*) FROM groups WHERE parent_id=?) + (SELECT COUNT(*) FROM user_groups WHERE group_id=?) + (SELECT COUNT(*) FROM users WHERE department_id=?) + (SELECT COUNT(*) FROM documents WHERE scope_id IN (SELECT id FROM scopes WHERE group_id=?)) + (SELECT COUNT(*) FROM org_memories WHERE scope_id IN (SELECT id FROM scopes WHERE group_id=?)) + (SELECT COUNT(*) FROM skill_families WHERE scope_id IN (SELECT id FROM scopes WHERE group_id=?)) + (SELECT COUNT(*) FROM promotions WHERE target_scope IN (SELECT id FROM scopes WHERE group_id=?)) + (SELECT COUNT(*) FROM document_submissions WHERE target_scope IN (SELECT id FROM scopes WHERE group_id=?)) AS n`).get(id,id,id,id,id,id,id,id) as any
+    if(refs.n)return reply.code(409).send(fail(4091,'分组仍有子分组、成员或知识记录，无法删除'))
+    db.prepare('DELETE FROM groups WHERE id=?').run(id);app.audit(req,'user_change',id,{groupDeleted:true});return reply.send(ok({deleted:true}))
+  })
+
   /** 可见性单元列表。上传文档时需要 scope_id,前端从这里取。 */
   app.get(
     '/api/v1/scopes',
@@ -200,7 +224,7 @@ export function registerAdminRoutes(app: FastifyInstance): void {
         claims.role === 'admin'
           ? `SELECT s.id, s.kind, s.name, s.group_id AS groupId,
                     s.owner_user_id AS ownerUserId
-               FROM v_effective_scopes s ORDER BY s.kind, s.name`
+               FROM v_effective_scopes s WHERE s.kind!='personal' OR s.owner_user_id=? ORDER BY s.kind, s.name`
           : `SELECT s.id, s.kind, s.name, s.group_id AS groupId,
                     s.owner_user_id AS ownerUserId
                FROM v_effective_scopes s
@@ -209,7 +233,7 @@ export function registerAdminRoutes(app: FastifyInstance): void {
               ORDER BY s.kind, s.name`
       const rows =
         claims.role === 'admin'
-          ? db.prepare(sql).all()
+          ? db.prepare(sql).all(claims.sub)
           : db.prepare(sql).all(claims.sub)
       const access = loadAccessContext(db, claims.sub)
       return reply.send(ok((rows as Array<Record<string, unknown> & { id: string }>).map((scope) => ({
@@ -224,19 +248,15 @@ export function registerAdminRoutes(app: FastifyInstance): void {
     '/api/v1/admin/audit',
     { preHandler: [app.authenticate, requireAdmin] },
     async (req, reply) => {
-      const q = req.query as Record<string, string>
-      return reply.send(
-        ok(
-          queryAuditLogs(db, {
-            action: q.action,
-            actorId: q.actorId,
-            from: q.from ? Number(q.from) : undefined,
-            to: q.to ? Number(q.to) : undefined,
-            limit: q.limit ? Number(q.limit) : 100,
-            offset: q.offset ? Number(q.offset) : 0
-          })
-        )
-      )
+      const p=z.object({action:z.string().max(80).optional(),actorId:z.string().max(200).optional(),from:z.coerce.number().int().min(0).optional(),to:z.coerce.number().int().min(0).optional(),limit:z.coerce.number().int().min(1).max(200).default(100),offset:z.coerce.number().int().min(0).default(0),page:z.coerce.number().int().min(1).optional()}).safeParse(req.query)
+      if(!p.success)return reply.code(400).send(fail(4001,'审计筛选参数错误'))
+      const q=p.data
+      const items=queryAuditLogs(db,{...q,offset:q.page?(q.page-1)*q.limit:q.offset})
+      if(!q.page)return reply.send(ok(items))
+      const where:string[]=[],args:unknown[]=[]
+      for(const [clause,value] of [['action = ?',q.action],['actor_id = ?',q.actorId],['created_at >= ?',q.from],['created_at <= ?',q.to]] as const)if(value!==undefined){where.push(clause);args.push(value)}
+      const total=(db.prepare(`SELECT COUNT(*) AS n FROM audit_logs ${where.length?'WHERE '+where.join(' AND '):''}`).get(...args) as any).n
+      return reply.send(ok({items,total,page:q.page,size:q.limit}))
     }
   )
 }

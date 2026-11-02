@@ -106,10 +106,10 @@ describe('Skill 个人/企业发布与同步', () => {
     expect(others.json().data).toHaveLength(0)
   })
 
-  it('组织 Skill 审核前不可见，审核后可同步、下载和验签', async () => {
+  it('组织 Skill 安全检查后自动可见，可同步、下载和验签', async () => {
     const zip = await skillZip('customer-weekly')
     const submitted = await submit(aliceToken, orgScope, zip)
-    expect(submitted.json().data.state).toBe('pending')
+    expect(submitted.json().data.state).toBe('approved')
     const versionId = submitted.json().data.submissionId
 
     const memberReviewDownload = await app.inject({
@@ -129,7 +129,7 @@ describe('Skill 个人/企业发布与同步', () => {
     )
 
     const before = await app.inject({ method: 'GET', url: '/api/v1/skills', headers: bearer(bobToken) })
-    expect(before.json().data).toHaveLength(0)
+    expect(before.json().data).toHaveLength(1)
 
     const approved = await app.inject({
       method: 'POST',

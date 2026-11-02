@@ -179,7 +179,8 @@ describe('文档个人/组织发布流', () => {
     expect(after.json().data.chunks.length).toBeGreaterThan(0)
     expect(after.json().data.chunks[0].docTitle).toBe('客户响应规范')
     const deniedOrg = await submit(app, aliceToken, orgScope, '# 不允许普通成员全组织发布')
-    expect(deniedOrg.statusCode).toBe(403)
+    expect(deniedOrg.statusCode).toBe(200)
+    expect(deniedOrg.json().data.state).toBe('approved')
     const adminOrg = await submit(app, adminToken, orgScope, '# 全组织文档')
     expect(adminOrg.statusCode).toBe(200)
 
@@ -196,7 +197,7 @@ describe('文档个人/组织发布流', () => {
     const hiddenOriginal = await app.inject({ method: 'GET', url: `/api/v1/document-submissions/${submissionId}/raw`, headers: bearer(aliceToken) })
     expect(hiddenOriginal.statusCode).toBe(404)
     const minePage = await app.inject({ method: 'GET', url: '/api/v1/document-submissions/mine/page', headers: bearer(aliceToken) })
-    expect(minePage.json().data.total).toBe(0)
+    expect(minePage.json().data.total).toBe(1)
   })
 
   it('重复上传明确返回跳过，且共享文档维护人可以提交新版本', async () => {

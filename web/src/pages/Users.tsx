@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import {
   Table, Button, Modal, Form, Input, Select, Tag, Space, Switch, message,
-  Popconfirm, Tooltip,
+  Popconfirm, Tooltip, Alert,
 } from 'antd'
 import { PlusOutlined, KeyOutlined, DisconnectOutlined } from '@ant-design/icons'
 import * as api from '../api'
@@ -10,9 +10,9 @@ import { fmtRelative } from '../utils/format'
 import { getUser } from '../store/auth'
 
 const ROLE_META: Record<Role, { color: string; label: string; hint: string }> = {
-  admin: { color: 'red', label: '管理员', hint: '全部权限,含用户与模型配置' },
-  curator: { color: 'orange', label: '知识审核', hint: '可审核提升、管理文档,不能改用户' },
-  member: { color: 'default', label: '成员', hint: '只能检索与提交候选知识' },
+  admin: { color: 'red', label: '管理员', hint: '可登录此后台，配置服务、管理成员与知识' },
+  curator: { color: 'orange', label: '知识维护', hint: '客户端知识维护权限，不可登录此后台' },
+  member: { color: 'default', label: '成员', hint: '使用桌面端检索与提交知识，不可登录此后台' },
 }
 
 const CLEARANCE = [
@@ -48,7 +48,7 @@ export default function Users() {
       title: `重置 ${u.displayName} 的密码`,
       content: (
         <>
-          <p style={{ color: '#888', fontSize: 13 }}>
+          <p style={{ color: 'var(--echo-text-muted)', fontSize: 13 }}>
             重置后该用户的所有登录会话立即失效,需用新密码重新登录。
           </p>
           <Input.Password placeholder="新密码,至少 8 位" onChange={(e) => { pw = e.target.value }} />
@@ -74,7 +74,7 @@ export default function Users() {
             {r.displayName}
             {r.id === me?.id && <Tag style={{ marginLeft: 6 }}>我</Tag>}
           </span>
-          <span style={{ fontSize: 12, color: '#999' }}>{r.username}</span>
+          <span style={{ fontSize: 12, color: 'var(--echo-text-muted)' }}>{r.username}</span>
         </Space>
       ),
     },
@@ -98,7 +98,7 @@ export default function Users() {
       title: '所属分组',
       dataIndex: 'groups',
       render: (gs: { id: string; name: string }[]) =>
-        gs?.length ? gs.map((g) => <Tag key={g.id}>{g.name}</Tag>) : <span style={{ color: '#bbb' }}>未分组</span>,
+        gs?.length ? gs.map((g) => <Tag key={g.id}>{g.name}</Tag>) : <span style={{ color: 'var(--echo-text-muted)' }}>未分组</span>,
     },
     {
       title: '状态',
@@ -136,13 +136,14 @@ export default function Users() {
 
   return (
     <>
-      <Space style={{ marginBottom: 16 }}>
+      <Alert showIcon type="info" message="这里管理组织成员与客户端权限；仅管理员可登录本后台。" style={{ marginBottom: 16 }} />
+      <Space className="echo-toolbar" wrap>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
           新建用户
         </Button>
       </Space>
 
-      <Table rowKey="id" loading={loading} columns={columns} dataSource={users} pagination={false} />
+      <Table scroll={{ x: 900 }} rowKey="id" loading={loading} columns={columns} dataSource={users} pagination={false} />
 
       <CreateModal
         open={createOpen}
@@ -225,7 +226,8 @@ function CreateModal({
         >
           <Select options={CLEARANCE} />
         </Form.Item>
-        <Form.Item name="groupIds" label="所属分组" extra="决定能看到哪些团队的知识">
+        <Form.Item name="departmentId" label="主归属部门" extra="用于新调用的用量归属，历史统计保留原部门。"><Select allowClear options={groups.map(g=>({value:g.id,label:g.name}))}/></Form.Item>
+        <Form.Item name="groupIds" label="知识访问分组" extra="决定能看到哪些团队的知识">
           <Select
             mode="multiple"
             allowClear
@@ -256,6 +258,7 @@ function EditModal({
       role: user.role,
       clearance: user.clearance,
       status: user.status === 'active',
+      departmentId: user.departmentId,
       groupIds: user.groups?.map((g) => g.id) ?? [],
     })
   }, [user, form])
@@ -274,6 +277,7 @@ function EditModal({
           role: v.role,
           clearance: v.clearance,
           status: v.status ? 'active' : 'disabled',
+          departmentId: v.departmentId ?? null,
           groupIds: v.groupIds,
         })
         message.success('已保存。权限变更会让该用户当前会话立即失效')
@@ -303,7 +307,8 @@ function EditModal({
         <Form.Item name="clearance" label="密级权限">
           <Select options={CLEARANCE} />
         </Form.Item>
-        <Form.Item name="groupIds" label="所属分组">
+        <Form.Item name="departmentId" label="主归属部门" extra="用于新调用的用量归属，历史统计保留原部门。"><Select allowClear options={groups.map(g=>({value:g.id,label:g.name}))}/></Form.Item>
+        <Form.Item name="groupIds" label="知识访问分组">
           <Select
             mode="multiple"
             allowClear
