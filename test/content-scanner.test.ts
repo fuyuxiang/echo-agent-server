@@ -7,6 +7,18 @@ import { probeAntivirus, scanDocument, scanSkillPackage } from '../src/security/
 const cfg = testConfig()
 
 describe('发布前技术扫描', () => {
+  it('接受仅有空 embeddings 目录的普通 PPTX，仍拒绝实际嵌入对象', async () => {
+    const zip = new JSZip()
+    zip.file('[Content_Types].xml', '<Types/>')
+    zip.file('ppt/slides/slide1.xml', '<p:sld>普通文本幻灯片</p:sld>')
+    zip.folder('ppt/embeddings')
+    const clean = await scanDocument(await zip.generateAsync({type:'nodebuffer'}), 'pptx', cfg)
+    expect(clean.status).toBe('passed')
+    zip.file('ppt/embeddings/oleObject1.bin', Buffer.from([1,2,3]))
+    const embedded = await scanDocument(await zip.generateAsync({type:'nodebuffer'}), 'pptx', cfg)
+    expect(embedded.status).toBe('failed')
+    expect(embedded.findings).toContainEqual(expect.objectContaining({code:'OFFICE_EMBEDDED_OBJECT',path:'ppt/embeddings/oleObject1.bin'}))
+  })
   it('拒绝扩展名与真实文件魔数不一致', async () => {
     const report = await scanDocument(Buffer.from('not a pdf'), 'pdf', cfg)
     expect(report.status).toBe('failed')

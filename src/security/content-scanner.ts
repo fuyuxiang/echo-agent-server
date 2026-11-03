@@ -96,6 +96,9 @@ async function inspectOffice(
     findings.push(finding('MIME_MISMATCH', 'critical', `文件内容与 ${sourceType} 扩展名不匹配`))
   }
   for (const name of names) {
+    // OOXML writers may emit an empty embeddings/ directory. A directory is
+    // not an embedded object; inspect actual entries within it instead.
+    if (zip.files[name].dir) continue
     if (/(?:vbaProject\.bin|macrosheets?|activeX|customUI)/i.test(name)) {
       findings.push(finding('OFFICE_ACTIVE_CONTENT', 'critical', '检测到宏或 ActiveX 主动内容', name))
     }

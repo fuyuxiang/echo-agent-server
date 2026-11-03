@@ -16,6 +16,10 @@ const Query = z.object({
 })
 interface Source { select: string; from: string; where: string[]; params: unknown[]; order: string; scope: string; search: string; filters: Record<string, string> }
 
+// A degraded index can still contain vectors from successful embedding batches.
+const documentVectors = 'FROM chunks vc JOIN chunk_vectors v ON v.chunk_id=vc.id WHERE vc.doc_id=d.id'
+const degradedDocument = "d.status='ready' AND d.fts_status='ready' AND d.vector_status='degraded'"
+
 /** Dedicated management pages share one bounded query contract. Existing array
  * endpoints remain unchanged for runtime and older desktop clients. */
 function source(resource: Resource, ctx: AccessContext): Source {
@@ -33,12 +37,18 @@ function source(resource: Resource, ctx: AccessContext): Source {
   }
   if (resource === 'documents') return {
     select:`d.id,d.title,d.source_type AS sourceType,d.status,d.fail_reason AS failReason,d.byte_size AS byteSize,
+      d.fts_status AS ftsStatus,d.vector_status AS vectorStatus,
       d.owner_id AS ownerId,d.updated_at AS updatedAt,s.id AS scopeId,s.kind AS scopeKind,s.name AS scopeName,
-      u.display_name AS ownerName,(SELECT COUNT(*) FROM chunks c WHERE c.doc_id=d.id) AS chunkCount`,
+      u.display_name AS ownerName,(SELECT COUNT(*) FROM chunks c WHERE c.doc_id=d.id) AS chunkCount,
+      (SELECT COUNT(*) ${documentVectors}) AS vectorChunkCount`,
     from:`documents d JOIN document_families f ON f.id=d.family_id ${shared}d.scope_id LEFT JOIN users u ON u.id=d.owner_id`,
     where:[visible('d.scope_id'),'d.sensitivity<=?',"f.state='active'","d.status!='archived'","(d.status!='ready' OR f.current_document_id=d.id)"],
     params:[...ctx.scopeIds,ctx.clearance],scope:'d.scope_id',search:'d.title',order:'d.updated_at DESC,d.id',
-    filters:{ready:"d.status='ready'",processing:"d.status IN ('pending','parsing','chunking','embedding')",failed:"d.status='failed'"}
+    filters:{
+      ready:"d.status='ready'",processing:"d.status IN ('pending','parsing','chunking','embedding')",failed:"d.status='failed'",
+      keywordOnly:`${degradedDocument} AND NOT EXISTS (SELECT 1 ${documentVectors})`,
+      semanticPartial:`${degradedDocument} AND EXISTS (SELECT 1 ${documentVectors})`
+    }
   }
   if (resource === 'skills') return {
     select:`sf.id AS skillId,sv.id AS versionId,sf.name,sf.description,sv.version,sf.mandatory,
@@ -102,7 +112,8 @@ export function registerKnowledgeLibraryRoutes(app:FastifyInstance):void {
       return (db.prepare(`SELECT COUNT(*) AS n FROM ${s.from} WHERE ${s.where.join(' AND ')}`).get(...s.params) as {n:number}).n
     }
     if(query.resource==='summary')return reply.send(ok({
-      memories:count('memories'),documents:count('documents'),documentReady:count('documents','ready'),documentProcessing:count('documents','processing'),
+      memories:count('memories'),documents:count('documents'),documentReady:count('documents','ready'),documentProcessing:count('documents','processing'),documentKeywordOnly:count('documents','keywordOnly'),
+      documentSemanticPartial:count('documents','semanticPartial'),
       skills:count('skills'),skillInstalled:count('skills','installed'),skillMandatory:count('skills','mandatory'),
       memoryPending:count('memory-submissions','pending'),documentPending:count('document-submissions','pending'),skillPending:count('skill-submissions','pending')
     }))

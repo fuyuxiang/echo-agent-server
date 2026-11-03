@@ -98,6 +98,27 @@ describe('检索链路端到端', () => {
     retriever = new Retriever({ db, cfg, embedder, reranker })
   })
 
+  it('范围类型过滤同时约束经验和文档，并与顶层范围取交集', async () => {
+    const now = Date.now()
+    db.prepare("INSERT INTO scopes VALUES ('s_personal','team',NULL,'我的空间')").run()
+    db.prepare("INSERT INTO personal_scope_owners(scope_id,user_id) VALUES ('s_personal','u_be')").run()
+    for (const [id,scope] of [['m-personal','s_personal'],['m-team','s_be'],['m-org','s_org'],['m-hidden','s_fin']]) {
+      db.prepare("INSERT INTO org_memories(id,scope_id,kind,content,confidence,status,created_at,updated_at) VALUES (?,?,'howto','发布验收流程需要验证',0.9,'active',?,?)").run(id,scope,now,now)
+    }
+    await addDoc(db,{scopeId:'s_personal',title:'发布验收个人流程',text:'发布验收流程需要验证。'})
+    await addDoc(db,{scopeId:'s_be',title:'发布验收团队流程',text:'发布验收流程需要验证。'})
+    const filtered=await retriever.retrieve('u_be',{query:'发布验收流程',filters:{scopeKinds:['team','org']}})
+    expect(filtered.memories.map(m=>m.id).sort()).toEqual(['m-org','m-team'])
+    expect([...new Set(filtered.chunks.map(c=>c.docTitle))]).toEqual(['发布验收团队流程'])
+    const personal=await retriever.retrieve('u_be',{query:'发布验收流程',filters:{scopeKinds:['personal']}})
+    expect(personal.memories.map(m=>m.id)).toEqual(['m-personal'])
+    expect([...new Set(personal.chunks.map(c=>c.docTitle))]).toEqual(['发布验收个人流程'])
+    const overlap=await retriever.retrieve('u_be',{query:'发布验收流程',scopes:['team'],filters:{scopeKinds:['org']}})
+    expect(overlap.memories).toEqual([]);expect(overlap.chunks).toEqual([])
+    const explicit=await retriever.retrieve('u_be',{query:'发布验收流程',scopeIds:['s_personal'],filters:{scopeKinds:['team']}})
+    expect(explicit.memories).toEqual([]);expect(explicit.chunks).toEqual([])
+  })
+
   it('能检索到组织层文档并带引用信息', async () => {
     await addDoc(db, {
       scopeId: 's_org',

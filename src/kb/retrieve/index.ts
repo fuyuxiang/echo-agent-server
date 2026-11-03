@@ -124,7 +124,9 @@ export class Retriever {
 
     // 服务端按"用户可见 scope � 客户端请求 scope"二次收敛。
     // 即使客户端误传越权 scope,这里也会被裁掉。
-    if (req.scopes && req.scopes.length > 0) {
+    const kindConstraints = [req.scopes, req.filters?.scopeKinds]
+      .filter((kinds): kinds is string[] => !!kinds && kinds.length > 0)
+    if (kindConstraints.length > 0) {
       const kindOf = (sid: string): 'personal' | 'org' | 'team' | null => {
         const r = this.deps.db
           .prepare('SELECT kind FROM v_effective_scopes WHERE id = ?')
@@ -137,7 +139,7 @@ export class Retriever {
       const filtered: string[] = []
       for (const sid of ctx.scopeIds) {
         const kind = kindOf(sid)
-        if (kind !== null && req.scopes.includes(kind)) filtered.push(sid)
+        if (kind !== null && kindConstraints.every(kinds => kinds.includes(kind))) filtered.push(sid)
       }
       if (filtered.length === 0) {
         return this.empty(t0)

@@ -9,6 +9,10 @@ import { buildApp } from '../src/app.js'
 import { createUser } from '../src/dao/users.js'
 import { ensureOrgScope } from '../src/server.js'
 import { createDocumentFamily, activateDocumentVersion } from '../src/dao/documents.js'
+import { createEmbedder } from '../src/models/embedder.js'
+import { drain, enqueueIngest } from '../src/kb/ingest/worker.js'
+import { vectorSearch } from '../src/kb/retrieve/recall.js'
+import { loadAccessContext } from '../src/auth/scopes.js'
 
 let db:DB, app:FastifyInstance, directory:string, token:string, userId:string, otherId:string, scope:string
 beforeEach(async()=>{
@@ -89,6 +93,50 @@ describe('组织资源工作区分页与权限',()=>{
    expect((await get('documents')).json().data).toMatchObject({total:125,items:expect.any(Array)})
    expect((await get('documents',{filter:'processing'})).json().data).toMatchObject({total:1,items:[{id:'processing'}]})
    expect((await get('summary')).json().data).toMatchObject({documents:125,documentReady:123,documentProcessing:1})
+ })
+ it('关键词降级状态在列表、筛选和概览中保持一致',async()=>{
+   document('keyword-only');document('semantic')
+   db.prepare("UPDATE documents SET fts_status='ready',vector_status='degraded' WHERE id='keyword-only'").run()
+   db.prepare("UPDATE documents SET fts_status='ready',vector_status='ready' WHERE id='semantic'").run()
+   expect((await get('documents',{filter:'keywordOnly'})).json().data).toMatchObject({total:1,items:[{id:'keyword-only',ftsStatus:'ready',vectorStatus:'degraded',vectorChunkCount:0}]})
+   expect((await get('summary')).json().data).toMatchObject({documentKeywordOnly:1,documentSemanticPartial:0})
+ })
+ it('跨批次摄取区分部分向量可用、仅关键词与重建恢复，并保留真实召回能力',async()=>{
+   const cfg=testConfig({storageDir:directory}),base=createEmbedder(cfg)
+   const content=Array.from({length:33},(_,i)=>`# 验收项${i+1}\n\n发布验收流程需要验证，第${i+1}项检查。`).join('\n\n')
+   const key=await app.deps.storage.put(Buffer.from(content),'md','published/documents')
+   document('batch-document','pending')
+   db.prepare("UPDATE documents SET storage_key=? WHERE id='batch-document'").run(key)
+   let batch=0
+   const partial={model:base.model,dim:base.dim,semantic:base.semantic,embed:base.embed.bind(base),embedBatch:async(texts:string[])=>{
+     if(++batch===2)throw new Error('第二批嵌入暂不可用')
+     return base.embedBatch(texts)
+   }}
+   enqueueIngest(db,'batch-document');await drain({db,cfg,embedder:partial})
+   expect(batch).toBe(2)
+   expect((await get('documents',{filter:'semanticPartial'})).json().data).toMatchObject({total:1,items:[{
+     id:'batch-document',status:'ready',ftsStatus:'ready',vectorStatus:'degraded',chunkCount:33,vectorChunkCount:32
+   }]})
+   expect((await get('documents',{filter:'keywordOnly'})).json().data.total).toBe(0)
+   expect((await get('summary')).json().data).toMatchObject({documentReady:1,documentKeywordOnly:0,documentSemanticPartial:1})
+   expect(vectorSearch(db,await base.embed('发布验收流程'),loadAccessContext(db,userId))).toHaveLength(32)
+
+   const unavailable={...partial,embedBatch:async():Promise<number[][]>=>{throw new Error('嵌入服务暂不可用')}}
+   enqueueIngest(db,'batch-document');await drain({db,cfg,embedder:unavailable})
+   expect((await get('documents',{filter:'keywordOnly'})).json().data).toMatchObject({total:1,items:[{vectorChunkCount:0,chunkCount:33}]})
+   expect((await get('documents',{filter:'semanticPartial'})).json().data.total).toBe(0)
+   expect((await get('summary')).json().data).toMatchObject({documentReady:1,documentKeywordOnly:1,documentSemanticPartial:0})
+   const retrieval=await app.inject({method:'POST',url:'/api/v1/retrieve',headers:{authorization:`Bearer ${token}`},payload:{query:'发布验收流程'}})
+   expect(retrieval.statusCode).toBe(200)
+   expect(retrieval.json().data.chunks.length).toBeGreaterThan(0)
+   expect(retrieval.json().data.diagnostics.bm25Hits).toBeGreaterThan(0)
+   expect(retrieval.json().data.diagnostics.vecHits).toBe(0)
+
+   enqueueIngest(db,'batch-document');await drain({db,cfg,embedder:base})
+   expect((await get('documents')).json().data).toMatchObject({total:1,items:[{vectorStatus:'ready',vectorChunkCount:33,chunkCount:33}]})
+   for(const filter of ['keywordOnly','semanticPartial'])expect((await get('documents',{filter})).json().data.total).toBe(0)
+   expect((await get('summary')).json().data).toMatchObject({documentReady:1,documentKeywordOnly:0,documentSemanticPartial:0})
+   expect(vectorSearch(db,await base.embed('发布验收流程'),loadAccessContext(db,userId))).toHaveLength(33)
  })
  it('拒绝未认证请求、非法资源、超大分页和错误筛选',async()=>{
    expect((await app.inject({url:'/api/v1/knowledge/library?resource=summary'})).statusCode).toBe(401)

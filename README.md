@@ -242,6 +242,8 @@ Docker Compose 更新流程。新增迁移 `011_gateway_operations.sql` 为增�
 
 ### 管理工作流与状态口径
 
+组织文档的“可检索”同时包含完整索引、部分语义索引和仅关键词三种情况。知识工作区列表返回 `chunkCount` 与 `vectorChunkCount`；`keywordOnly` 筛选及 `documentKeywordOnly` 只统计全文索引就绪且完全没有向量的降级文档，`semanticPartial` 筛选及 `documentSemanticPartial` 统计仍有部分向量的降级文档。两类互不重叠，并遵守授权范围、密级和当前文档版本限制。重建完成后，文档仍可检索，对应降级统计归零。
+
 管理端按「概览、知识资产、成员与设备、模型服务、系统管理」五个一级入口组织。
 成员详情集中呈现共享知识权限、接入指引、用量、适用配额、密钥及设备；个人知识不在后台展示。
 `/search` 兼容跳转到质量改进中的检索验证；既有 API 路径继续兼容。
