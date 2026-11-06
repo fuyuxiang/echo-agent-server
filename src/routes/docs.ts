@@ -65,7 +65,7 @@ export function registerDocsRoutes(app: FastifyInstance): void {
   /**
    * 上传。
    *
-   * 去重按 (scope_id, content_hash):同一份文件在不同 scope 下是两份
+   * 根目录去重按 (scope_id, content_hash):同一份文件在不同 scope 下是两份
    * 独立文档(可见范围不同),不能合并。
    */
   app.post(
@@ -113,8 +113,8 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       const hash = createHash('sha256').update(buf).digest('hex')
       const existing = db
         .prepare(
-          `SELECT id, status FROM documents
-            WHERE content_hash = ? AND scope_id = ? AND status NOT IN ('archived','failed')`
+          `SELECT d.id,d.status FROM documents d JOIN document_families f ON f.id=d.family_id
+            WHERE d.content_hash=? AND d.scope_id=? AND f.folder_id IS NULL AND d.status NOT IN ('archived','failed')`
         )
         .get(hash, scopeId) as { id: string; status: string } | undefined
       if (existing) {
@@ -568,12 +568,15 @@ export function registerDocsRoutes(app: FastifyInstance): void {
           db.prepare(
             `UPDATE document_families SET
                canonical_title = COALESCE(?, canonical_title),
+               folder_id = CASE WHEN ? IS NULL OR ?=scope_id THEN folder_id ELSE NULL END,
                scope_id = COALESCE(?, scope_id),
                owner_id = CASE WHEN ? THEN ? ELSE owner_id END,
                updated_at = ?
              WHERE id = (SELECT family_id FROM documents WHERE id = ?)`
           ).run(
             v.title ?? null,
+            v.scopeId ?? null,
+            v.scopeId ?? null,
             v.scopeId ?? null,
             v.ownerId !== undefined ? 1 : 0,
             v.ownerId ?? null,

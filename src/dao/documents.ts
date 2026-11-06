@@ -5,6 +5,7 @@ export interface CreateDocumentFamilyInput {
   scopeId: string
   title: string
   ownerId: string | null
+  folderId?: string | null
   now?: number
 }
 /** 创建逻辑文档。物理版本只有 ready 后才会成为 current。 */
@@ -17,9 +18,9 @@ export function createDocumentFamily(
   db.prepare(
     `INSERT INTO document_families
        (id, scope_id, canonical_title, owner_id, current_document_id,
-        state, created_at, updated_at)
-     VALUES (?,?,?,?,NULL,'active',?,?)`
-  ).run(id, input.scopeId, input.title, input.ownerId, now, now)
+        state, folder_id, created_at, updated_at)
+     VALUES (?,?,?,?,NULL,'active',?,?,?)`
+  ).run(id, input.scopeId, input.title, input.ownerId, input.folderId ?? null, now, now)
   return id
 }
 

@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { type AuthedRequest, requireCurator } from '../auth/jwt.js'
 import { loadManagementContext, canAccessScope, canPublishDocument, loadAccessContext } from '../auth/scopes.js'
 import { deleteChunks } from '../kb/ingest/indexer.js'
+import { findDocumentFolder } from '../dao/document-folders.js'
 import { archiveFamilyIfCurrent } from '../dao/documents.js'
 import { createDocumentFamily } from '../dao/documents.js'
 import { sourceTypeFromName, SUPPORTED_EXTENSIONS } from '../kb/ingest/parse.js'
@@ -22,6 +23,7 @@ const PublishCopySchema = z.object({
 })
 
 export interface SubmissionRow {
+  folderId?: string | null
   id: string
   submitterId: string
   targetScope: string
@@ -72,6 +74,7 @@ export function createDocumentFromSubmission(
     const familyId = createDocumentFamily(db, {
       scopeId: row.targetScope,
       title: row.title,
+      folderId: row.folderId,
       ownerId: row.submitterId,
       now
     })
@@ -137,9 +140,9 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       return reply.code(403).send(fail(4033, '没有目标范围的文档发布权限'))
     }
     const existing = db.prepare(
-      `SELECT id,status,sensitivity FROM documents
-        WHERE scope_id=? AND content_hash=? AND status NOT IN ('archived','failed')
-        ORDER BY created_at DESC LIMIT 1`
+      `SELECT d.id,d.status,d.sensitivity FROM documents d JOIN document_families f ON f.id=d.family_id
+        WHERE d.scope_id=? AND d.content_hash=? AND f.folder_id IS NULL AND d.status NOT IN ('archived','failed')
+        ORDER BY d.created_at DESC LIMIT 1`
     ).get(target.id, source.contentHash) as { id: string; status: string; sensitivity: number } | undefined
     if (existing) return reply.send(ok({
       submissionId: null,
@@ -250,6 +253,14 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
         return reply.code(403).send(fail(4036, '企业策略已禁用个人云知识'))
       }
 
+      const folderId = fields.folderId?.value || null
+      if (folderId) {
+        const folder = findDocumentFolder(db, folderId)
+        if (!folder || folder.scopeId !== targetScope) {
+          data.file.resume()
+          return reply.code(404).send(fail(4041, '目标目录不存在或不属于该范围'))
+        }
+      }
       const fileName = data.filename ?? 'untitled'
       const sourceType = sourceTypeFromName(fileName)
       if (!sourceType) {
@@ -271,14 +282,18 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
       const sizedCapabilityError = await sourceCapabilityError(sourceType, app.deps, buf.length)
       if (sizedCapabilityError) return reply.code(503).send(fail(5033, sizedCapabilityError))
 
+      const rawTitle = fields.title?.value?.trim() || fileName
+      const title = folderId ? rawTitle.normalize('NFC') : rawTitle
+      if (folderId && (title.length > 255 || /[\\/\u0000-\u001f\u007f]/u.test(title) || title === '.' || title === '..')) return reply.code(400).send(fail(4001, '目录中的文档名称无效'))
       const contentHash = createHash('sha256').update(buf).digest('hex')
       const published = db
         .prepare(
-          `SELECT id, status, sensitivity FROM documents
-            WHERE scope_id = ? AND content_hash = ? AND status NOT IN ('archived','failed')
-            ORDER BY created_at DESC LIMIT 1`
+          `SELECT d.id,d.status,d.sensitivity FROM documents d JOIN document_families f ON f.id=d.family_id
+            WHERE d.scope_id=? AND d.content_hash=? AND f.folder_id IS ? AND f.state='active' AND (? IS NULL OR f.canonical_title=?)
+              AND d.status NOT IN ('archived','failed')
+            ORDER BY d.created_at DESC LIMIT 1`
         )
-        .get(targetScope, contentHash) as { id: string; status: string; sensitivity: number } | undefined
+        .get(targetScope, contentHash, folderId, folderId, title) as { id: string; status: string; sensitivity: number } | undefined
       if (published) {
         return reply.send(ok({
           submissionId: null,
@@ -292,7 +307,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
 
       const now = Date.now()
       const id = randomUUID()
-      const title = fields.title?.value?.trim() || fileName
+      if (folderId && db.prepare("SELECT id FROM document_families WHERE scope_id=? AND folder_id=? AND canonical_title=? AND state='active'").get(targetScope,folderId,title)) return reply.code(409).send(fail(4091, '当前目录已有同名文档，请通过“新版本”更新'))
       const sensitivity = Math.max(0, Math.min(2, Number(fields.sensitivity?.value ?? 0)))
       const volatility = fields.volatility?.value === 'volatile' ? 'volatile' : 'stable'
       const tags = readTags(fields.tags?.value)
@@ -313,6 +328,7 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
 
       const submission: SubmissionRow = {
         id,
+        folderId,
         submitterId: claims.sub,
         targetScope,
         title,
@@ -358,6 +374,8 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
         now
       )
 
+      db.prepare('UPDATE document_submissions SET folder_id=? WHERE id=?').run(folderId,id)
+
       const report = await scanDocument(buf, sourceType, cfg)
       const completedAt = Date.now()
       if (report.status === 'failed') {
@@ -386,7 +404,12 @@ export function registerDocumentSubmissionRoutes(app: FastifyInstance): void {
         submission.storageKey = publishedKey
         submission.state = 'approved'
         submission.publishedStorageKey = publishedKey
-        docId = createDocumentFromSubmission(app, submission, now)
+        try { docId = createDocumentFromSubmission(app, submission, now) }
+        catch (error) {
+          if (!folderId || !db.prepare("SELECT id FROM document_families WHERE scope_id=? AND folder_id=? AND canonical_title=? AND state='active'").get(targetScope,folderId,title)) throw error
+          db.prepare("UPDATE document_submissions SET state='rejected',review_note='目录中已有同名文档，请上传新版本',reviewed_at=? WHERE id=?").run(Date.now(),id)
+          return reply.code(409).send(fail(4091, '当前目录已有同名文档，请通过“新版本”更新'))
+        }
         db.prepare(
           `UPDATE document_submissions
               SET state='approved', storage_key=?, quarantine_storage_key=NULL,

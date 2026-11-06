@@ -17,6 +17,7 @@ export type AuditAction =
   | 'logout'
   | 'retrieve'
   | 'upload'
+  | 'document_folders_import'
   | 'delete'
   | 'patch'
   | 'approve'

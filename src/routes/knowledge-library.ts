@@ -1,7 +1,8 @@
 import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { type AuthedRequest } from '../auth/jwt.js'
-import { loadAccessContext, type AccessContext } from '../auth/scopes.js'
+import { findDocumentFolder, folderBreadcrumbs, importDocumentFolders } from '../dao/document-folders.js'
+import { loadManagementContext, canPublishDocument, loadAccessContext, type AccessContext } from '../auth/scopes.js'
 import { fail, ok } from '../reply.js'
 
 const resources = ['memories', 'documents', 'skills', 'memory-submissions', 'document-submissions', 'skill-submissions'] as const
@@ -10,6 +11,7 @@ const Query = z.object({
   resource: z.enum([...resources, 'summary']),
   scopeId: z.string().max(256).optional(),
   q: z.string().max(2000).optional(),
+  folderId: z.string().min(1).max(256).optional(),
   filter: z.string().max(30).optional(),
   page: z.coerce.number().int().min(1).max(1000000).default(1),
   size: z.coerce.number().int().min(1).max(100).default(20)
@@ -36,7 +38,7 @@ function source(resource: Resource, ctx: AccessContext): Source {
     filters:Object.fromEntries(['fact','decision','convention','pitfall','howto'].map(kind=>[kind,`m.kind='${kind}'`]))
   }
   if (resource === 'documents') return {
-    select:`d.id,d.title,d.source_type AS sourceType,d.status,d.fail_reason AS failReason,d.byte_size AS byteSize,
+    select:`d.id,d.title,f.folder_id AS folderId,d.source_type AS sourceType,d.status,d.fail_reason AS failReason,d.byte_size AS byteSize,
       d.fts_status AS ftsStatus,d.vector_status AS vectorStatus,
       d.owner_id AS ownerId,d.updated_at AS updatedAt,s.id AS scopeId,s.kind AS scopeKind,s.name AS scopeName,
       u.display_name AS ownerName,(SELECT COUNT(*) FROM chunks c WHERE c.doc_id=d.id) AS chunkCount,
@@ -101,6 +103,22 @@ function hydrate(resource:Resource,row:Record<string,unknown>) {
 
 export function registerKnowledgeLibraryRoutes(app:FastifyInstance):void {
   const {db}=app.deps
+  app.post('/api/v1/document-folders/import',{preHandler:app.authenticate},async(req,reply)=>{
+    const parsed=z.object({scopeId:z.string().min(1).max(256),parentFolderId:z.string().min(1).max(256).nullish(),paths:z.array(z.string().min(1).max(1024)).min(1).max(5000)}).safeParse(req.body)
+    if(!parsed.success)return reply.code(400).send(fail(4001,'目录参数无效'))
+    const {scopeId,parentFolderId,paths}=parsed.data
+    const claims=(req as AuthedRequest).claims
+    const ctx=loadManagementContext(db,claims.sub,claims.role)
+    if(!canPublishDocument(db,ctx,claims.role,scopeId))return reply.code(403).send(fail(4033,'没有目标范围的文档发布权限'))
+    const scope=db.prepare('SELECT kind FROM v_effective_scopes WHERE id=?').get(scopeId) as {kind:string}|undefined
+    if(scope?.kind==='personal'&&(db.prepare("SELECT allow_personal_cloud AS enabled FROM enterprise_policy WHERE id='default'").get() as {enabled:number}|undefined)?.enabled===0)return reply.code(403).send(fail(4036,'企业策略已禁用个人云知识'))
+    if(parentFolderId&&findDocumentFolder(db,parentFolderId)?.scopeId!==scopeId)return reply.code(404).send(fail(4041,'目标目录不存在或不属于该范围'))
+    try{
+      const folders=importDocumentFolders(db,scopeId,parentFolderId??null,paths,claims.sub)
+      app.audit(req,'document_folders_import',scopeId,{folderCount:folders.length,parentFolderId:parentFolderId??null})
+      return reply.send(ok({folders}))
+    }catch(error){return reply.code(400).send(fail(4001,error instanceof Error?error.message:'目录创建失败'))}
+  })
   app.get('/api/v1/knowledge/library',{preHandler:app.authenticate},async(req,reply)=>{
     const parsed=Query.safeParse(req.query??{})
     if(!parsed.success)return reply.code(400).send(fail(4001,'查询参数错误'))
@@ -118,6 +136,14 @@ export function registerKnowledgeLibraryRoutes(app:FastifyInstance):void {
       memoryPending:count('memory-submissions','pending'),documentPending:count('document-submissions','pending'),skillPending:count('skill-submissions','pending')
     }))
     const s=source(query.resource,ctx)
+    const browsing=query.resource==='documents'&&query.folderId!==undefined
+    let breadcrumbs:ReturnType<typeof folderBreadcrumbs>=[]
+    if(browsing&&query.folderId!=='root'){
+      const folder=findDocumentFolder(db,query.folderId!)
+      if(!folder||!ctx.scopeIds.includes(folder.scopeId)||(query.scopeId&&query.scopeId!==folder.scopeId))return reply.code(404).send(fail(4041,'目录不存在或无权访问'))
+      breadcrumbs=folderBreadcrumbs(db,folder.id)
+    }
+    if(browsing&&!query.q){s.where.push('f.folder_id IS ?');s.params.push(query.folderId==='root'?null:query.folderId)}
     if(query.scopeId){s.where.push(`${s.scope}=?`);s.params.push(query.scopeId)}
     if(query.q){s.where.push(`(${s.search}) LIKE ? ESCAPE '\\'`);s.params.push(`%${query.q.replace(/[\\%_]/g,'\\$&')}%`)}
     if(query.filter){
@@ -126,8 +152,29 @@ export function registerKnowledgeLibraryRoutes(app:FastifyInstance):void {
     }
     const where=s.where.join(' AND ')
     const total=(db.prepare(`SELECT COUNT(*) AS n FROM ${s.from} WHERE ${where}`).get(...s.params) as {n:number}).n
+    const offset=(query.page-1)*query.size
+    let folderTotal=0
+    let folders:Record<string,unknown>[]=[]
+    if(browsing&&!query.q){
+      const folderWhere=['df.parent_id IS ?',`df.scope_id IN (${ctx.scopeIds.map(()=>'?').join(',')||'NULL'})`]
+      const params:unknown[]=[query.folderId==='root'?null:query.folderId,...ctx.scopeIds]
+      if(query.scopeId){folderWhere.push('df.scope_id=?');params.push(query.scopeId)}
+      const clause=folderWhere.join(' AND ')
+      folderTotal=(db.prepare(`SELECT COUNT(*) AS n FROM document_folders df WHERE ${clause}`).get(...params) as {n:number}).n
+      folders=db.prepare(`SELECT df.id,df.name,df.parent_id AS parentId,df.scope_id AS scopeId,s.name AS scopeName,s.kind AS scopeKind FROM document_folders df JOIN v_effective_scopes s ON s.id=df.scope_id WHERE ${clause} ORDER BY df.name,df.id LIMIT ? OFFSET ?`).all(...params,query.size,offset) as Record<string,unknown>[]
+    }
     const rows=db.prepare(`SELECT ${s.select} FROM ${s.from} WHERE ${where} ORDER BY ${s.order} LIMIT ? OFFSET ?`)
-      .all(...s.params,query.size,(query.page-1)*query.size) as Record<string,unknown>[]
-    return reply.send(ok({items:rows.map(row=>hydrate(query.resource as Resource,row)),total,page:query.page,size:query.size}))
+      .all(...s.params,query.size-folders.length,Math.max(0,offset-folderTotal)) as Record<string,unknown>[]
+    const pathCache=new Map<string,string>()
+    const items=rows.map(row=>{
+      if(query.resource==='documents'){
+        const id=row.folderId as string|null
+        if(id&&!pathCache.has(id))pathCache.set(id,folderBreadcrumbs(db,id).map(folder=>folder.name).join('/'))
+        row.folderPath=id?pathCache.get(id):''
+      }
+      return hydrate(query.resource as Resource,row)
+    })
+    return reply.send(ok({items,total:total+folderTotal,page:query.page,size:query.size,
+      ...(browsing?{supportsFolders:true,folders,breadcrumbs,documentTotal:total,folderTotal}:{})}))
   })
 }
