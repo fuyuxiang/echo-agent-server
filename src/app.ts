@@ -1,3 +1,4 @@
+import { registerProjectRoutes } from './routes/projects.js'
 import { registerAdministrationRoutes } from './routes/administration.js'
 import { registerSecurityCheckRoutes } from './routes/security-checks.js'
 import { registerReviewLocks } from './operations/review-lock.js'
@@ -245,6 +246,7 @@ export function buildApp(opts: BuildOptions): FastifyInstance {
   registerReviewLocks(app)
   registerAuthRoutes(app)
   registerBootstrapRoutes(app)
+  registerProjectRoutes(app)
   registerRetrieveRoutes(app)
   registerKnowledgeAskRoutes(app)
   registerKnowledgeContextRoutes(app)

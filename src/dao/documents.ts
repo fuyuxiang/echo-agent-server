@@ -54,8 +54,9 @@ export function activateDocumentVersion(db: DB, docId: string, now = Date.now())
   db.prepare(
     `UPDATE document_families
         SET current_document_id = ?, state = 'active', updated_at = ?
-      WHERE id = ?`
-  ).run(docId, now, familyId)
+      WHERE id = ? AND state = 'active' AND (current_document_id IS NULL OR
+        (SELECT version FROM documents WHERE id=current_document_id) < (SELECT version FROM documents WHERE id=?))`
+  ).run(docId, now, familyId, docId)
 }
 
 export function documentIsCurrent(db: DB, docId: string): boolean {

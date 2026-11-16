@@ -4,7 +4,7 @@ import JSZip from 'jszip'
 import { parseDocument } from 'yaml'
 import { z } from 'zod'
 import { type AuthedRequest, requireCurator } from '../auth/jwt.js'
-import { loadManagementContext, canAccessScope, loadAccessContext } from '../auth/scopes.js'
+import { loadManagementContext, canAccessScope, canPublishDocument, loadAccessContext } from '../auth/scopes.js'
 import { fail, ok } from '../reply.js'
 import { signServerPayload } from '../server-signing.js'
 import { scanSkillPackage, scanNeedsRetry, type ScanReport } from '../security/content-scanner.js'
@@ -204,7 +204,7 @@ export function registerSkillRoutes(app: FastifyInstance): void {
     if (!scopeId) return reply.code(400).send(fail(4001, '缺少 scopeId'))
     const claims = (req as AuthedRequest).claims
     const ctx = loadAccessContext(db, claims.sub)
-    if (!canAccessScope(ctx, scopeId)) return reply.code(403).send(fail(4033, '无权向该范围提交 Skill'))
+    if (!canAccessScope(ctx, scopeId) || !canPublishDocument(db,ctx,claims.role,scopeId)) return reply.code(403).send(fail(4033, '无权向该范围提交 Skill'))
     const scope = db.prepare(
       'SELECT kind, owner_user_id AS ownerUserId FROM v_effective_scopes WHERE id = ?'
     ).get(scopeId) as { kind: 'personal' | 'team' | 'org'; ownerUserId: string | null } | undefined

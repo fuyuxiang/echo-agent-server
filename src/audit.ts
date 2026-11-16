@@ -53,6 +53,10 @@ export type AuditAction =
   | 'skill_disable'
   | 'skill_rollback'
   | 'enterprise_policy_update'
+  | 'project_create'
+  | 'project_invite'
+  | 'project_remove_member'
+  | 'project_asset_publish'
 
 /**
  * 审计写入。

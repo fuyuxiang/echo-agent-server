@@ -39,10 +39,20 @@ export function loadAccessContext(db: DB, userId: string): AccessContext {
 /** Admin console may manage organization and team scopes, never another user's private scope. */
 export function loadManagementContext(db: DB, userId: string, role: string): AccessContext {
   const ctx = loadAccessContext(db, userId)
+  const projectAdministration = new Set((db.prepare("SELECT p.scope_id AS scopeId FROM projects p JOIN project_members m ON m.project_id=p.id WHERE m.user_id=? AND m.role='admin'")
+    .all(userId) as {scopeId:string}[]).map(row=>row.scopeId))
+  const projectScopes = new Set((db.prepare('SELECT scope_id AS scopeId FROM projects').all() as {scopeId:string}[]).map(row=>row.scopeId))
+  ctx.scopeIds = ctx.scopeIds.filter(scope=>!projectScopes.has(scope)||projectAdministration.has(scope))
   if (role !== 'admin') return ctx
-  const shared = db.prepare("SELECT id FROM v_effective_scopes WHERE kind IN ('org','team')")
+  const shared = db.prepare("SELECT id FROM v_effective_scopes WHERE kind IN ('org','team') AND id NOT IN (SELECT scope_id FROM projects)")
     .all() as { id: string }[]
   return { ...ctx, scopeIds: [...new Set([...ctx.scopeIds, ...shared.map((row) => row.id)])] }
+}
+
+/** Downloading is a read, including for project collaborators and viewers. */
+export function loadDocumentReadContext(db: DB, userId: string, role: string): AccessContext {
+  const management=loadManagementContext(db,userId,role),access=loadAccessContext(db,userId)
+  return {...access,scopeIds:[...new Set([...management.scopeIds,...access.scopeIds])]}
 }
 
 /**
@@ -60,6 +70,8 @@ export function canPublishDocument(
   role: 'admin' | 'curator' | 'member',
   scopeId: string
 ): boolean {
+  const project = db.prepare('SELECT p.id,m.role FROM projects p LEFT JOIN project_members m ON m.project_id=p.id AND m.user_id=? WHERE p.scope_id=?').get(ctx.userId,scopeId) as {id:string;role:string|null}|undefined
+  if (project) return canAccessScope(ctx,scopeId) && (project.role==='admin'||project.role==='collaborator')
   const scope = db.prepare(
     'SELECT kind, owner_user_id AS ownerUserId FROM v_effective_scopes WHERE id = ?'
   ).get(scopeId) as { kind: string; ownerUserId: string | null } | undefined
@@ -90,4 +102,15 @@ export function canAccessDocument(
   // fetch 与检索语义一致。
   if (row.status !== 'ready') return false
   return canAccessScope(ctx, row.scopeId) && row.sensitivity <= ctx.clearance
+}
+
+/** Project uploads are scanned before publication. Raw files can be shared
+ * while indexing is pending/failed, without pretending they are searchable. */
+export function canDownloadDocument(db: DB, ctx: AccessContext, docId: string): boolean {
+  if (canAccessDocument(db,ctx,docId)) return true
+  const row=db.prepare(`SELECT d.scope_id AS scopeId,d.sensitivity,d.status FROM documents d
+    JOIN projects p ON p.scope_id=d.scope_id
+    JOIN document_families f ON f.id=d.family_id AND f.state='active'
+    WHERE d.id=?`).get(docId) as {scopeId:string;sensitivity:number;status:string}|undefined
+  return !!row && row.status!=='archived' && canAccessScope(ctx,row.scopeId) && row.sensitivity<=ctx.clearance
 }

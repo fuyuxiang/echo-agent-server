@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import { ok, fail } from '../reply.js'
 import { requireCurator, type AuthedRequest } from '../auth/jwt.js'
-import { loadAccessContext, loadManagementContext, canAccessScope, canAccessDocument, canPublishDocument } from '../auth/scopes.js'
+import { loadAccessContext, loadManagementContext, loadDocumentReadContext, canAccessScope, canAccessDocument, canDownloadDocument, canPublishDocument } from '../auth/scopes.js'
 import { readDocumentChunks } from '../dao/document-content.js'
 import { enqueueIngest } from '../kb/ingest/worker.js'
 import { deleteChunks } from '../kb/ingest/indexer.js'
@@ -86,6 +86,9 @@ export function registerDocsRoutes(app: FastifyInstance): void {
       if (!target || (target.kind === 'personal' && target.ownerUserId !== claims.sub) ||
           (claims.role !== 'admin' && !canAccessScope(ctx, scopeId))) {
         return reply.code(403).send(fail(4032, '无权向该范围上传'))
+      }
+      if (!canPublishDocument(db,ctx,claims.role,scopeId)) {
+        return reply.code(403).send(fail(4032,'当前项目角色不能发布资料'))
       }
 
       const fileName = data.filename ?? 'untitled'
@@ -478,8 +481,8 @@ export function registerDocsRoutes(app: FastifyInstance): void {
   app.get('/api/v1/docs/:id/raw', { preHandler: app.authenticate }, async (req, reply) => {
     const { id } = req.params as { id: string }
     const claims = (req as AuthedRequest).claims
-    const ctx = loadManagementContext(db, claims.sub, claims.role)
-    if (!canAccessDocument(db, ctx, id)) {
+    const ctx = loadDocumentReadContext(db, claims.sub, claims.role)
+    if (!canDownloadDocument(db, ctx, id)) {
       return reply.code(404).send(fail(4041, '文档不存在或无权访问'))
     }
 
@@ -489,6 +492,9 @@ export function registerDocsRoutes(app: FastifyInstance): void {
     if (!doc?.storageKey) return reply.code(404).send(fail(4042, '原始文件不存在'))
 
     const buf = await storage.get(doc.storageKey)
+    if (!canDownloadDocument(db, loadDocumentReadContext(db,claims.sub,claims.role), id)) {
+      return reply.code(404).send(fail(4041,'文档不存在或访问权限已撤销'))
+    }
     // 强制下载而非内联渲染:HTML/SVG 内联会带来存储型 XSS。
     return reply
       .header('content-disposition', `attachment; filename*=UTF-8''${encodeURIComponent(doc.title)}`)
