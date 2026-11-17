@@ -27,6 +27,34 @@ beforeEach(async()=>{
 })
 afterEach(async()=>{await app.close();db.close();rmSync(dir,{recursive:true,force:true})})
 describe('team project ownership, grounded handoff and live scope authorization',()=>{
+ it('shares idempotent project comments only with authorized members',async()=>{
+  const p=await create(),base=`/api/v1/projects/${p.id}`,clientRequestId=crypto.randomUUID()
+  await request('a','POST',`${base}/members`,{username:'b',role:'collaborator'})
+  await request('a','POST',`${base}/members`,{username:'c',role:'viewer'})
+  const input={content:'本周先完成需求访谈。',clientRequestId}
+  const posted=(await request('b','POST',`${base}/comments`,input)).json().data
+  expect((await request('b','POST',`${base}/comments`,input)).json().data.id).toBe(posted.id)
+  expect((await request('c','GET',base)).json().data.comments).toMatchObject([{content:input.content,actorName:'b'}])
+  expect((await request('c','POST',`${base}/comments`,{...input,clientRequestId:crypto.randomUUID()})).statusCode).toBe(403)
+  expect((await request('outsider','GET',base)).statusCode).toBe(404)
+  await request('a','DELETE',`${base}/members/${ids.b}`)
+  expect((await request('b','POST',`${base}/comments`,input)).statusCode).toBe(404)
+ })
+ it('corrects and retires decisions without losing earlier versions or allowing stale writes',async()=>{
+  const p=await create(),base=`/api/v1/projects/${p.id}`
+  const id=(await request('a','POST',`${base}/decisions`,{content:'原决定',rationale:'原依据'})).json().data.id
+  await request('a','PATCH',`${base}/decisions/${id}`,{expectedRevision:1,status:'active'})
+  expect((await request('a','PATCH',`${base}/decisions/${id}`,{expectedRevision:2,content:'更正后的决定'})).statusCode).toBe(200)
+  const decision=(await request('a','GET',base)).json().data.decisions[0]
+  expect(decision).toMatchObject({content:'更正后的决定',rationale:'原依据',status:'active',revision:3})
+  expect(decision.history).toHaveLength(2)
+  expect(decision.history[0].content).toBe('原决定')
+  expect((await request('a','PATCH',`${base}/decisions/${id}`,{expectedRevision:2,content:'过期覆盖'})).statusCode).toBe(409)
+  await request('a','PATCH',`${base}/decisions/${id}`,{expectedRevision:3,status:'retired'})
+  expect((await request('a','PATCH',`${base}/decisions/${id}`,{expectedRevision:4,status:'active'})).statusCode).toBe(200)
+  await request('a','POST',`${base}/members`,{username:'b',role:'collaborator'})
+  expect((await request('b','PATCH',`${base}/decisions/${id}`,{expectedRevision:5,content:'越权覆盖'})).statusCode).toBe(403)
+ })
  it('A/B publish work; newly invited C can understand it, claim work and continue without their clients',async()=>{
   const p=await create(),base=`/api/v1/projects/${p.id}`
   expect((await request('a','POST',`${base}/members`,{username:'b',role:'collaborator'})).statusCode).toBe(200)
@@ -83,6 +111,7 @@ describe('team project ownership, grounded handoff and live scope authorization'
   }
   const uploaded=await upload('# 联调规范\n\n接口联调超时为三十秒。')
   expect(uploaded.statusCode).toBe(200)
+  expect(typeof uploaded.json().data.familyId).toBe('string')
   expect((await request('a','GET',`/api/v1/docs/${uploaded.json().data.docId}/raw`)).statusCode).toBe(200)
   await drain(app.deps)
   const docId=uploaded.json().data.docId
@@ -98,6 +127,7 @@ describe('team project ownership, grounded handoff and live scope authorization'
   const fields=`--EchoProjectBoundary\r\nContent-Disposition: form-data; name="familyId"\r\n\r\n${asset.familyId}\r\n--EchoProjectBoundary\r\nContent-Disposition: form-data; name="expectedVersion"\r\n\r\n1\r\n`
   const next=await upload('# 联调规范\n\n接口联调超时为六十秒。',fields)
   expect(next.statusCode).toBe(200)
+  expect(next.json().data.familyId).toBe(uploaded.json().data.familyId)
   expect((await upload('stale write',fields)).statusCode).toBe(409)
   const before=(await request('c','POST',`${base}/ask`,{question:'接口联调超时是多少？'})).json().data
   expect(before.citations.some((c:{resourceId:string})=>c.resourceId===docId)).toBe(true)
@@ -162,4 +192,62 @@ describe('team project ownership, grounded handoff and live scope authorization'
   release()
   expect((await response).statusCode).toBe(404)
  })
+})
+
+it('advertises collaboration capabilities and searches active non-member candidates without granting project access',async()=>{
+ const caps=await request('a','GET','/api/v1/projects/capabilities')
+ expect(caps.json().data).toMatchObject({version:4,projectComments:true,decisionRevisions:true,memberSearch:true,memberRoles:true,idempotentCreate:true,taskIdentity:true})
+ const p=await create(),base=`/api/v1/projects/${p.id}`
+ const bootstrap=(await request('a','GET','/api/v1/client/bootstrap')).json().data
+ expect(bootstrap.projectCollaboration.version).toBe(3)
+ expect((await request('a','GET',`${base}/member-candidates?q=ou`)).json().data).toEqual([expect.objectContaining({username:'outsider'})])
+ expect((await request('a','GET',`${base}/member-candidates?q=__`)).json().data).toEqual([])
+ expect((await request('outsider','GET',`${base}/member-candidates?q=or`)).statusCode).toBe(404)
+ await request('a','POST',`${base}/members`,{username:'outsider',role:'viewer'})
+ expect((await request('a','GET',`${base}/member-candidates?q=ou`)).json().data).toEqual([])
+ expect((await request('outsider','GET',`${base}/member-candidates?q=or`)).statusCode).toBe(403)
+ db.prepare("UPDATE users SET status='disabled' WHERE id=?").run(ids.orgadmin)
+ expect((await request('a','GET',`${base}/member-candidates?q=org`)).json().data).toEqual([])
+})
+it('retries a stable local sharing request without duplicating the project and partitions keys by owner',async()=>{
+ const clientRequestId=randomUUID(),body={name:'本机项目',goal:'共享目标',clientRequestId}
+ const first=(await request('a','POST','/api/v1/projects',body)).json().data
+ const second=(await request('a','POST','/api/v1/projects',{...body,name:'later retry'})).json().data
+ expect(second.id).toBe(first.id)
+ expect(second.name).toBe('本机项目')
+ expect((db.prepare('SELECT count(*) AS n FROM projects').get() as {n:number}).n).toBe(1)
+ expect((await request('b','POST','/api/v1/projects',body)).json().data.id).not.toBe(first.id)
+})
+it('changes participant permissions with revision checks, protects the owner, and revokes editing immediately',async()=>{
+ const p=await create(),base=`/api/v1/projects/${p.id}`
+ await request('a','POST',`${base}/members`,{username:'b',role:'collaborator'})
+ let current=(await request('a','GET',base)).json().data
+ expect((await request('b','PATCH',`${base}/members/${ids.a}`,{role:'viewer',expectedRevision:current.revision})).statusCode).toBe(403)
+ expect((await request('a','PATCH',`${base}/members/${ids.a}`,{role:'viewer',expectedRevision:current.revision})).statusCode).toBe(409)
+ expect((await request('a','PATCH',`${base}/members/${ids.b}`,{role:'viewer',expectedRevision:current.revision-1})).statusCode).toBe(409)
+ const changed=await request('a','PATCH',`${base}/members/${ids.b}`,{role:'viewer',expectedRevision:current.revision})
+ expect(changed.statusCode).toBe(200)
+ expect(changed.json().data.members.find((member:{userId:string})=>member.userId===ids.b).role).toBe('viewer')
+ expect((await request('b','POST',`${base}/tasks`,{title:'不可写'})).statusCode).toBe(403)
+})
+
+it('keeps task identity on retry without overwriting state and isolates identities by project and member',async()=>{
+ const p=await create(),base=`/api/v1/projects/${p.id}`,clientRequestId=randomUUID()
+ const first=await request('a','POST',`${base}/tasks`,{title:'统一任务',description:'保留原说明',clientRequestId})
+ expect(first.statusCode).toBe(200)
+ const taskId=first.json().data.id
+ await request('a','PATCH',`${base}/tasks/${taskId}`,{expectedRevision:1,status:'review'})
+ expect((await request('a','POST',`${base}/tasks`,{title:'不覆盖已有标题',clientRequestId})).json().data.id).toBe(taskId)
+ let state=(await request('a','GET',base)).json().data
+ expect(state.tasks).toHaveLength(1)
+ expect(state.tasks[0]).toMatchObject({title:'统一任务',description:'保留原说明',status:'review',revision:2})
+ await request('a','POST',`${base}/members`,{username:'b',role:'collaborator'})
+ expect((await request('b','POST',`${base}/tasks`,{title:'另一个人的任务',clientRequestId})).json().data.id).not.toBe(taskId)
+ const other=await create()
+ expect((await request('a','POST',`/api/v1/projects/${other.id}/tasks`,{title:'另一个项目',clientRequestId})).json().data.id).not.toBe(taskId)
+ await request('a','DELETE',`${base}/members/${ids.b}`)
+ expect((await request('b','POST',`${base}/tasks`,{title:'已失去权限',clientRequestId})).statusCode).toBe(404)
+ state=(await request('a','GET',base)).json().data
+ expect(state.tasks).toHaveLength(2)
+ expect(db.prepare('SELECT count(*) AS n FROM project_task_requests').get()).toEqual({n:3})
 })

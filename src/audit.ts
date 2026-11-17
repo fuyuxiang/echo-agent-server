@@ -56,6 +56,7 @@ export type AuditAction =
   | 'project_create'
   | 'project_invite'
   | 'project_remove_member'
+  | 'project_member_role'
   | 'project_asset_publish'
 
 /**

@@ -13,12 +13,20 @@ import { documentIsCurrent } from '../dao/documents.js'
 import type { RetrievedChunk } from '../kb/retrieve/index.js'
 import { evidenceFromChunks, fallbackPlan, generateAnswerDraft, renderClaims, verifyClaims } from '../kb/agentic.js'
 
+interface ProjectDecisionRow {
+ id:string;content:string;rationale:string;status:string;sourceTaskId:string|null;sourceDocumentId:string|null;
+ supersedesId:string|null;confirmedBy:string|null;revision:number;updatedAt:number;
+}
+
 const Revision = z.number().int().positive()
-const TaskInput = z.object({
+const TaskFields = z.object({
  title: z.string().trim().min(1).max(300), description: z.string().max(12000).default(''),
  acceptance: z.string().max(4000).default(''), assigneeId: z.string().nullable().default(null)
 }).strict()
-const TaskPatch = TaskInput.partial().extend({
+const TaskInput = TaskFields.extend({clientRequestId:z.string().uuid().optional()}).strict()
+const TaskPatch = z.object({
+ title:z.string().trim().min(1).max(300).optional(),description:z.string().max(12000).optional(),
+ acceptance:z.string().max(4000).optional(),assigneeId:z.string().nullable().optional(),
  expectedRevision: Revision,
  status: z.enum(['pending','in_progress','blocked','review','accepted']).optional()
 }).strict()
@@ -90,8 +98,9 @@ export function registerProjectRoutes(app: FastifyInstance): void {
     FROM project_members m JOIN users u ON u.id=m.user_id WHERE m.project_id=? ORDER BY m.joined_at,m.user_id`).all(p.id),
    tasks:db.prepare(`SELECT t.id,t.title,t.description,t.acceptance,t.assignee_id AS assigneeId,u.display_name AS assigneeName,t.status,t.revision,t.updated_at AS updatedAt
     FROM project_tasks t LEFT JOIN users u ON u.id=t.assignee_id WHERE project_id=? ORDER BY t.created_at,t.id LIMIT 500`).all(p.id),
-   decisions:db.prepare(`SELECT id,content,rationale,status,source_task_id AS sourceTaskId,source_document_id AS sourceDocumentId,supersedes_id AS supersedesId,
-    confirmed_by AS confirmedBy,revision,updated_at AS updatedAt FROM project_decisions WHERE project_id=? ORDER BY created_at DESC,id LIMIT 500`).all(p.id),
+   decisions:(db.prepare(`SELECT id,content,rationale,status,source_task_id AS sourceTaskId,source_document_id AS sourceDocumentId,supersedes_id AS supersedesId,
+    confirmed_by AS confirmedBy,revision,updated_at AS updatedAt FROM project_decisions WHERE project_id=? ORDER BY created_at DESC,id LIMIT 500`).all(p.id) as ProjectDecisionRow[]).map(row=>({...row,history:db.prepare('SELECT revision,content,rationale,status,changed_at AS updatedAt FROM project_decision_history WHERE decision_id=? ORDER BY revision DESC LIMIT 100').all(row.id)})),
+   comments:db.prepare(`SELECT c.id,c.content,c.created_at AS createdAt,u.display_name AS actorName FROM project_comments c JOIN users u ON u.id=c.actor_id WHERE c.project_id=? ORDER BY c.created_at DESC,c.id DESC LIMIT 100`).all(p.id),
    assets:db.prepare(`SELECT d.id,d.family_id AS familyId,d.title,d.version,d.status,d.fail_reason AS failReason,d.fts_status AS ftsStatus,d.vector_status AS vectorStatus,
     d.byte_size AS byteSize,d.updated_at AS updatedAt,f.current_document_id AS currentDocumentId
     FROM documents d JOIN document_families f ON f.id=d.family_id WHERE d.scope_id=? AND d.sensitivity<=? AND f.state='active'
@@ -111,20 +120,50 @@ export function registerProjectRoutes(app: FastifyInstance): void {
    }
   }})
  }
+ route('GET','/api/v1/projects/capabilities',()=>({version:4,memberSearch:true,memberRoles:true,idempotentCreate:true,taskIdentity:true,projectComments:true,decisionRevisions:true}))
+ route('GET','/api/v1/projects/:projectId/member-candidates',req=>{
+  const p=project(pid(req),actor(req),true,true)
+  const {q}=z.object({q:z.string().trim().max(120).default('')}).parse(req.query)
+  if(q.length<2)return []
+  const pattern=`%${q.replace(/[\\%_]/g,'\\$&')}%`
+  return db.prepare(`SELECT u.id AS userId,u.username,u.display_name AS displayName FROM users u
+   WHERE u.status='active' AND u.id NOT IN (SELECT user_id FROM project_members WHERE project_id=?)
+   AND (u.username LIKE ? ESCAPE '\\' OR u.display_name LIKE ? ESCAPE '\\')
+   ORDER BY u.display_name,u.username LIMIT 20`).all(p.id,pattern,pattern)
+ })
  route('GET','/api/v1/projects',req=>db.prepare(`SELECT p.id,p.name,p.goal,p.scope_id AS scopeId,p.owner_id AS ownerId,p.revision,p.updated_at AS updatedAt,m.role
   FROM projects p JOIN project_members m ON m.project_id=p.id WHERE m.user_id=? ORDER BY p.updated_at DESC LIMIT 500`).all(actor(req)))
  route('POST','/api/v1/projects',req=>{
-  const input=z.object({name:z.string().trim().min(1).max(120),goal:z.string().max(12000).default('')}).strict().parse(req.body)
-  const id=randomUUID(),scopeId=randomUUID(),now=Date.now(),userId=actor(req)
+  const input=z.object({name:z.string().trim().min(1).max(120),goal:z.string().max(12000).default(''),clientRequestId:z.string().uuid().optional()}).strict().parse(req.body)
+  const userId=actor(req)
+  if(input.clientRequestId){
+   const previous=db.prepare('SELECT project_id AS id FROM project_creation_keys WHERE owner_id=? AND request_key=?').get(userId,input.clientRequestId) as {id:string}|undefined
+   if(previous)return snapshot(project(previous.id,userId),userId)
+  }
+  const id=randomUUID(),scopeId=randomUUID(),now=Date.now()
   db.transaction(()=>{
    db.prepare("INSERT INTO scopes(id,kind,name) VALUES (?,'team',?)").run(scopeId,input.name)
    db.prepare('INSERT INTO projects(id,scope_id,name,goal,owner_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?)').run(id,scopeId,input.name,input.goal,userId,now,now)
    db.prepare("INSERT INTO project_members VALUES (?,?,'admin',?)").run(id,userId,now)
+   if(input.clientRequestId)db.prepare('INSERT INTO project_creation_keys(owner_id,request_key,project_id) VALUES (?,?,?)').run(userId,input.clientRequestId,id)
    app.audit(req,'project_create',id,{scopeId})
   })()
   return snapshot(project(id,userId),userId)
  })
  route('GET','/api/v1/projects/:projectId',req=>snapshot(project(pid(req),actor(req)),actor(req)))
+ route('POST','/api/v1/projects/:projectId/comments',req=>{
+  const p=project(pid(req),actor(req),true)
+  const input=z.object({content:z.string().trim().min(1).max(8000),clientRequestId:z.string().uuid()}).strict().parse(req.body)
+  const userId=actor(req)
+  const old=db.prepare('SELECT id FROM project_comments WHERE project_id=? AND actor_id=? AND request_key=?').get(p.id,userId,input.clientRequestId) as {id:string}|undefined
+  if(old)return old
+  const id=randomUUID()
+  db.transaction(()=>{
+   db.prepare('INSERT INTO project_comments VALUES (?,?,?,?,?,?)').run(id,p.id,userId,input.content,input.clientRequestId,Date.now())
+   event(p,userId,'comment_created',id)
+  })()
+  return {id}
+ })
  route('PATCH','/api/v1/projects/:projectId',req=>{
   const p=project(pid(req),actor(req),true,true)
   const input=z.object({name:z.string().trim().min(1).max(120),goal:z.string().max(12000),expectedRevision:Revision}).strict().parse(req.body)
@@ -148,6 +187,19 @@ export function registerProjectRoutes(app: FastifyInstance): void {
   })()
   return snapshot(project(p.id,actor(req)),actor(req))
  })
+ route('PATCH','/api/v1/projects/:projectId/members/:userId',req=>{
+  const p=project(pid(req),actor(req),true,true),{userId}=req.params as {userId:string}
+  const input=z.object({role:z.enum(['admin','collaborator','viewer']),expectedRevision:Revision}).strict().parse(req.body)
+  if(userId===p.ownerId)throw new ProjectError(409,'项目负责人权限不能修改')
+  db.transaction(()=>{
+   const latest=project(p.id,actor(req),true,true)
+   if(latest.revision!==input.expectedRevision)throw new ProjectError(409,'项目成员已更新，请刷新后重试')
+   const result=db.prepare("UPDATE project_members SET role=? WHERE project_id=? AND user_id=? AND EXISTS(SELECT 1 FROM users WHERE id=? AND status='active')").run(input.role,p.id,userId,userId)
+   if(!result.changes)throw new ProjectError(404,'成员不存在或已停用')
+   event(p,actor(req),'member_role_updated',userId);app.audit(req,'project_member_role',p.id,{userId,role:input.role})
+  })()
+  return snapshot(project(p.id,actor(req)),actor(req))
+ })
  route('DELETE','/api/v1/projects/:projectId/members/:userId',req=>{
   const p=project(pid(req),actor(req),true,true),{userId}=req.params as {userId:string}
   if(userId===p.ownerId)throw new ProjectError(409,'项目负责人不能被移除')
@@ -159,11 +211,16 @@ export function registerProjectRoutes(app: FastifyInstance): void {
  })
  route('POST','/api/v1/projects/:projectId/tasks',req=>{
   const p=project(pid(req),actor(req),true),input=TaskInput.parse(req.body),id=randomUUID(),now=Date.now()
+  if(input.clientRequestId){
+   const existing=db.prepare('SELECT task_id AS id FROM project_task_requests WHERE project_id=? AND actor_id=? AND request_key=?').get(p.id,actor(req),input.clientRequestId) as {id:string}|undefined
+   if(existing)return existing
+  }
   member(p,input.assigneeId)
   if((db.prepare('SELECT count(*) AS n FROM project_tasks WHERE project_id=?').get(p.id) as {n:number}).n>=500)throw new ProjectError(409,'项目工作项已达到上限')
   db.transaction(()=>{
    db.prepare(`INSERT INTO project_tasks(id,project_id,title,description,acceptance,assignee_id,created_by,updated_by,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id,p.id,input.title,input.description,input.acceptance,input.assigneeId,actor(req),actor(req),now,now)
+   if(input.clientRequestId)db.prepare('INSERT INTO project_task_requests VALUES (?,?,?,?)').run(p.id,actor(req),input.clientRequestId,id)
    event(p,actor(req),'task_created',id)
   })()
   return {id}
@@ -235,16 +292,19 @@ export function registerProjectRoutes(app: FastifyInstance): void {
  })
  route('PATCH','/api/v1/projects/:projectId/decisions/:decisionId',req=>{
   const p=project(pid(req),actor(req),true,true),{decisionId}=req.params as {decisionId:string}
-  const input=z.object({expectedRevision:Revision,status:z.enum(['active','retired']),supersedesId:z.string().optional(),supersedesRevision:Revision.optional()}).strict().parse(req.body)
+  const input=z.object({expectedRevision:Revision,status:z.enum(['active','retired']).optional(),content:z.string().trim().min(1).max(8000).optional(),rationale:z.string().max(8000).optional(),supersedesId:z.string().optional(),supersedesRevision:Revision.optional()}).strict().refine(v=>v.status!==undefined||v.content!==undefined||v.rationale!==undefined).parse(req.body)
   db.transaction(()=>{
+   const current=db.prepare('SELECT * FROM project_decisions WHERE id=? AND project_id=?').get(decisionId,p.id) as {revision:number;content:string;rationale:string;status:string;confirmed_by:string|null;supersedes_id:string|null}|undefined
+   if(!current||current.revision!==input.expectedRevision||current.status==='superseded')throw new ProjectError(409,'决策已变更，请刷新后重试')
    if(input.supersedesId){
     if(input.status!=='active'||input.supersedesId===decisionId||!input.supersedesRevision)throw new ProjectError(400,'请提供被替代决策的当前版本')
     const previous=db.prepare("UPDATE project_decisions SET status='superseded',revision=revision+1,updated_at=? WHERE id=? AND project_id=? AND status='active' AND revision=?")
      .run(Date.now(),input.supersedesId,p.id,input.supersedesRevision)
     if(!previous.changes)throw new ProjectError(409,'被替代决策已变更')
    }
-   const result=db.prepare(`UPDATE project_decisions SET status=?,confirmed_by=?,supersedes_id=?,revision=revision+1,updated_at=? WHERE id=? AND project_id=? AND revision=? AND status IN ('proposed','active')`)
-    .run(input.status,actor(req),input.supersedesId??null,Date.now(),decisionId,p.id,input.expectedRevision)
+   db.prepare('INSERT INTO project_decision_history VALUES (?,?,?,?,?,?,?,?,?)').run(randomUUID(),p.id,decisionId,current.revision,current.content,current.rationale,current.status,actor(req),Date.now())
+   const result=db.prepare(`UPDATE project_decisions SET content=?,rationale=?,status=?,confirmed_by=?,supersedes_id=?,revision=revision+1,updated_at=? WHERE id=? AND project_id=? AND revision=?`)
+    .run(input.content??current.content,input.rationale??current.rationale,input.status??current.status,input.status==='active'?actor(req):current.confirmed_by,input.supersedesId??current.supersedes_id,Date.now(),decisionId,p.id,input.expectedRevision)
    if(!result.changes)throw new ProjectError(409,'决策已变更，请刷新后重试')
    event(p,actor(req),'decision_updated',decisionId)
   })()
@@ -264,6 +324,7 @@ export function registerProjectRoutes(app: FastifyInstance): void {
   project(p.id,actor(req),true)
   const storageKey=await storage.put(buf,name.split('.').pop()??'txt','published/documents')
   const docId=randomUUID(),now=Date.now(),family=fields.familyId?.value
+  let publishedFamilyId:string|undefined
   try { db.transaction(()=>{
    project(p.id,actor(req),true)
    let familyId=family,version=1,supersedes:string|null=null
@@ -275,10 +336,11 @@ export function registerProjectRoutes(app: FastifyInstance): void {
    } else familyId=createDocumentFamily(db,{scopeId:p.scopeId,title:name,ownerId:actor(req),now})
    db.prepare(`INSERT INTO documents(id,scope_id,title,source_type,storage_key,content_hash,byte_size,owner_id,family_id,version,supersedes_id,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(docId,p.scopeId,name,sourceType,storageKey,createHash('sha256').update(buf).digest('hex'),buf.length,actor(req),familyId,version,supersedes,now,now)
+   publishedFamilyId=familyId
    enqueueIngest(db,docId);event(p,actor(req),'asset_published',docId)
    app.audit(req,'project_asset_publish',docId,{projectId:p.id,version})
   })() } catch(e) {await storage.delete(storageKey);throw e}
-  return {docId,status:'pending'}
+  return {docId,familyId:publishedFamilyId,status:'pending'}
  })
  route('POST','/api/v1/projects/:projectId/ask',async req=>{
   const p=project(pid(req),actor(req)),input=z.object({question:z.string().trim().min(1).max(8000),contextOnly:z.boolean().default(false)}).strict().parse(req.body)
