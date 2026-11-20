@@ -70,8 +70,8 @@ export function canPublishDocument(
   role: 'admin' | 'curator' | 'member',
   scopeId: string
 ): boolean {
-  const project = db.prepare('SELECT p.id,m.role FROM projects p LEFT JOIN project_members m ON m.project_id=p.id AND m.user_id=? WHERE p.scope_id=?').get(ctx.userId,scopeId) as {id:string;role:string|null}|undefined
-  if (project) return canAccessScope(ctx,scopeId) && (project.role==='admin'||project.role==='collaborator')
+  const project = db.prepare('SELECT p.id,p.deleted_at AS deletedAt,m.role FROM projects p LEFT JOIN project_members m ON m.project_id=p.id AND m.user_id=? WHERE p.scope_id=?').get(ctx.userId,scopeId) as {id:string;deletedAt:number|null;role:string|null}|undefined
+  if (project) return project.deletedAt===null && canAccessScope(ctx,scopeId) && (project.role==='admin'||project.role==='collaborator')
   const scope = db.prepare(
     'SELECT kind, owner_user_id AS ownerUserId FROM v_effective_scopes WHERE id = ?'
   ).get(scopeId) as { kind: string; ownerUserId: string | null } | undefined
@@ -92,7 +92,8 @@ export function canAccessDocument(
   const row = db
     .prepare(
       `SELECT scope_id AS scopeId, sensitivity, status
-         FROM documents WHERE id = ?`
+         FROM documents d WHERE d.id = ?
+          AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.scope_id=d.scope_id AND p.deleted_at IS NOT NULL)`
     )
     .get(docId) as { scopeId: string; sensitivity: number; status: string } | undefined
   if (!row) return false
@@ -109,7 +110,7 @@ export function canAccessDocument(
 export function canDownloadDocument(db: DB, ctx: AccessContext, docId: string): boolean {
   if (canAccessDocument(db,ctx,docId)) return true
   const row=db.prepare(`SELECT d.scope_id AS scopeId,d.sensitivity,d.status FROM documents d
-    JOIN projects p ON p.scope_id=d.scope_id
+    JOIN projects p ON p.scope_id=d.scope_id AND p.deleted_at IS NULL
     JOIN document_families f ON f.id=d.family_id AND f.state='active'
     WHERE d.id=?`).get(docId) as {scopeId:string;sensitivity:number;status:string}|undefined
   return !!row && row.status!=='archived' && canAccessScope(ctx,row.scopeId) && row.sensitivity<=ctx.clearance

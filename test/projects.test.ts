@@ -40,6 +40,36 @@ describe('team project ownership, grounded handoff and live scope authorization'
   await request('a','DELETE',`${base}/members/${ids.b}`)
   expect((await request('b','POST',`${base}/comments`,input)).statusCode).toBe(404)
  })
+ it('lets only project administrators delete at the confirmed revision, preserves history and revokes scope access',async()=>{
+  const p=await create(),base=`/api/v1/projects/${p.id}`
+  const unrelated=await create()
+  await request('a','POST',`${base}/members`,{username:'b',role:'collaborator'})
+  await request('a','POST',`${base}/members`,{username:'c',role:'viewer'})
+  const taskId=(await request('b','POST',`${base}/tasks`,{title:'保留审计中的任务'})).json().data.id
+  const before=(await request('a','GET',base)).json().data
+  const input={expectedRevision:before.revision}
+  expect((await request('b','DELETE',base,input)).statusCode).toBe(403)
+  expect((await request('c','DELETE',base,input)).statusCode).toBe(403)
+  expect((await request('orgadmin','DELETE',base,input)).statusCode).toBe(404)
+  expect((await request('a','DELETE',base,{expectedRevision:1})).statusCode).toBe(409)
+  expect(loadAccessContext(db,ids.c).scopeIds).toContain(p.scopeId)
+  expect((await request('a','DELETE',base,input)).json().data).toEqual({id:p.id})
+  expect((await request('a','DELETE',base,input)).statusCode).toBe(200)
+  expect((await request('b','DELETE',base,input)).statusCode).toBe(403)
+  expect((await request('c','GET',base)).statusCode).toBe(410)
+  expect((await request('outsider','GET',base)).statusCode).toBe(404)
+  expect((await request('a','POST',`${base}/tasks`,{title:'已删除项目无法写入'})).statusCode).toBe(410)
+  for(const user of ['a','b','c']){
+   expect((await request(user,'GET','/api/v1/projects')).json().data.map((row:{id:string})=>row.id)).not.toContain(p.id)
+   const access=loadAccessContext(db,ids[user])
+   expect(access.scopeIds).not.toContain(p.scopeId)
+   expect(canPublishDocument(db,access,'member',p.scopeId)).toBe(false)
+  }
+  expect((await request('a','GET',`/api/v1/projects/${unrelated.id}`)).statusCode).toBe(200)
+  expect(db.prepare('SELECT deleted_by, revision FROM projects WHERE id=?').get(p.id)).toEqual({deleted_by:ids.a,revision:before.revision+1})
+  expect(db.prepare('SELECT id FROM project_tasks WHERE id=?').get(taskId)).toEqual({id:taskId})
+  expect(db.prepare("SELECT actor_id FROM audit_logs WHERE action='project_delete' AND target=?").all(p.id)).toEqual([{actor_id:ids.a}])
+ })
  it('corrects and retires decisions without losing earlier versions or allowing stale writes',async()=>{
   const p=await create(),base=`/api/v1/projects/${p.id}`
   const id=(await request('a','POST',`${base}/decisions`,{content:'原决定',rationale:'原依据'})).json().data.id
@@ -138,6 +168,11 @@ describe('team project ownership, grounded handoff and live scope authorization'
   expect(after.citations.some((c:{resourceId:string})=>c.resourceId===docId)).toBe(false)
   await request('a','DELETE',`${base}/members/${ids.c}`)
   expect((await request('c','GET',`/api/v1/docs/${docId}/raw`)).statusCode).toBe(404)
+  const snapshotBeforeDelete=(await request('a','GET',base)).json().data
+  expect((await request('a','DELETE',base,{expectedRevision:snapshotBeforeDelete.revision})).statusCode).toBe(200)
+  expect((await request('c','GET',`/api/v1/docs/${docId}/raw`)).statusCode).toBe(404)
+  expect((await request('orgadmin','GET',`/api/v1/docs/${docId}/raw`)).statusCode).toBe(404)
+  expect(db.prepare('SELECT id FROM documents WHERE id=?').get(docId)).toEqual({id:docId})
  })
  it('records execution idempotently, marks completion for review, and fences late results after C takes over',async()=>{
   const p=await create(),base=`/api/v1/projects/${p.id}`
@@ -196,7 +231,7 @@ describe('team project ownership, grounded handoff and live scope authorization'
 
 it('advertises collaboration capabilities and searches active non-member candidates without granting project access',async()=>{
  const caps=await request('a','GET','/api/v1/projects/capabilities')
- expect(caps.json().data).toMatchObject({version:4,projectComments:true,decisionRevisions:true,memberSearch:true,memberRoles:true,idempotentCreate:true,taskIdentity:true})
+ expect(caps.json().data).toMatchObject({version:5,projectComments:true,decisionRevisions:true,memberSearch:true,memberRoles:true,idempotentCreate:true,taskIdentity:true,projectDeletion:true})
  const p=await create(),base=`/api/v1/projects/${p.id}`
  const bootstrap=(await request('a','GET','/api/v1/client/bootstrap')).json().data
  expect(bootstrap.projectCollaboration.version).toBe(3)

@@ -54,6 +54,7 @@ export type AuditAction =
   | 'skill_rollback'
   | 'enterprise_policy_update'
   | 'project_create'
+  | 'project_delete'
   | 'project_invite'
   | 'project_remove_member'
   | 'project_member_role'

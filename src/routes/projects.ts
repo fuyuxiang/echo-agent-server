@@ -34,7 +34,7 @@ const DecisionInput = z.object({
  content: z.string().trim().min(1).max(8000), rationale: z.string().max(8000).default(''),
  sourceTaskId: z.string().nullable().default(null), sourceDocumentId: z.string().nullable().default(null)
 }).strict()
-type Project = { id: string; scopeId: string; name: string; goal: string; ownerId: string; revision: number; updatedAt: number }
+type Project = { id: string; scopeId: string; name: string; goal: string; ownerId: string; revision: number; updatedAt: number; deletedAt: number | null }
 type Role = 'admin' | 'collaborator' | 'viewer'
 class ProjectError extends Error { constructor(readonly status: number, message: string) { super(message) } }
 
@@ -42,11 +42,12 @@ export function registerProjectRoutes(app: FastifyInstance): void {
  const { db, cfg, storage } = app.deps
  const actor = (req: FastifyRequest) => (req as AuthedRequest).claims.sub
  const pid = (req: FastifyRequest) => (req.params as { projectId: string }).projectId
- const project = (id: string, userId: string, write = false, admin = false): Project & { role: Role } => {
-  const row = db.prepare(`SELECT p.id,p.scope_id AS scopeId,p.name,p.goal,p.owner_id AS ownerId,p.revision,p.updated_at AS updatedAt,m.role
+ const project = (id: string, userId: string, write = false, admin = false, includeDeleted = false): Project & { role: Role } => {
+  const row = db.prepare(`SELECT p.id,p.scope_id AS scopeId,p.name,p.goal,p.owner_id AS ownerId,p.revision,p.updated_at AS updatedAt,p.deleted_at AS deletedAt,m.role
    FROM projects p JOIN project_members m ON m.project_id=p.id JOIN users u ON u.id=m.user_id AND u.status='active'
    WHERE p.id=? AND m.user_id=?`).get(id,userId) as (Project & { role: Role }) | undefined
   if (!row) throw new ProjectError(404,'项目不存在或已失去成员权限')
+  if (row.deletedAt !== null && !includeDeleted) throw new ProjectError(410,'共享项目已删除')
   if ((write && row.role==='viewer') || (admin && row.role!=='admin')) throw new ProjectError(403,'当前项目角色无权执行此操作')
   return row
  }
@@ -120,7 +121,7 @@ export function registerProjectRoutes(app: FastifyInstance): void {
    }
   }})
  }
- route('GET','/api/v1/projects/capabilities',()=>({version:4,memberSearch:true,memberRoles:true,idempotentCreate:true,taskIdentity:true,projectComments:true,decisionRevisions:true}))
+ route('GET','/api/v1/projects/capabilities',()=>({version:5,memberSearch:true,memberRoles:true,idempotentCreate:true,taskIdentity:true,projectComments:true,decisionRevisions:true,projectDeletion:true}))
  route('GET','/api/v1/projects/:projectId/member-candidates',req=>{
   const p=project(pid(req),actor(req),true,true)
   const {q}=z.object({q:z.string().trim().max(120).default('')}).parse(req.query)
@@ -132,7 +133,7 @@ export function registerProjectRoutes(app: FastifyInstance): void {
    ORDER BY u.display_name,u.username LIMIT 20`).all(p.id,pattern,pattern)
  })
  route('GET','/api/v1/projects',req=>db.prepare(`SELECT p.id,p.name,p.goal,p.scope_id AS scopeId,p.owner_id AS ownerId,p.revision,p.updated_at AS updatedAt,m.role
-  FROM projects p JOIN project_members m ON m.project_id=p.id WHERE m.user_id=? ORDER BY p.updated_at DESC LIMIT 500`).all(actor(req)))
+  FROM projects p JOIN project_members m ON m.project_id=p.id WHERE m.user_id=? AND p.deleted_at IS NULL ORDER BY p.updated_at DESC LIMIT 500`).all(actor(req)))
  route('POST','/api/v1/projects',req=>{
   const input=z.object({name:z.string().trim().min(1).max(120),goal:z.string().max(12000).default(''),clientRequestId:z.string().uuid().optional()}).strict().parse(req.body)
   const userId=actor(req)
@@ -174,6 +175,20 @@ export function registerProjectRoutes(app: FastifyInstance): void {
    event(p,actor(req),'project_updated',p.id)
   })()
   return snapshot(project(p.id,actor(req)),actor(req))
+ })
+ route('DELETE','/api/v1/projects/:projectId',req=>{
+  const {expectedRevision}=z.object({expectedRevision:Revision}).strict().parse(req.body)
+  const userId=actor(req)
+  return db.transaction(()=>{
+   const p=project(pid(req),userId,true,true,true)
+   if(p.deletedAt!==null)return {id:p.id}
+   const now=Date.now()
+   const result=db.prepare(`UPDATE projects SET deleted_at=?,deleted_by=?,updated_at=?,revision=revision+1
+    WHERE id=? AND revision=? AND deleted_at IS NULL`).run(now,userId,now,p.id,expectedRevision)
+   if(!result.changes)throw new ProjectError(409,'项目已更新，请刷新后重试')
+   app.audit(req,'project_delete',p.id,{scopeId:p.scopeId})
+   return {id:p.id}
+  }).immediate()
  })
  route('POST','/api/v1/projects/:projectId/members',req=>{
   const p=project(pid(req),actor(req),true,true)
